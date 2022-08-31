@@ -24,6 +24,13 @@ pub mod espnow;
     esp_idf_comp_esp_eth_enabled,
     esp_idf_comp_esp_event_enabled,
 ))]
+pub mod espmesh;
+#[cfg(all(
+    feature = "alloc",
+    esp_idf_comp_esp_eth_enabled,
+    esp_idf_comp_esp_event_enabled,
+    esp_idf_comp_esp_netif_enabled
+))]
 #[cfg(any(
     all(esp32, esp_idf_eth_use_esp32_emac),
     any(
