@@ -87,7 +87,7 @@ impl EspMeshClient {
             tos: data.tos as u32,
         }));
 
-        let opt: *const mesh_opt_t = match opt {
+        let opt = match opt {
             Some(MeshOpt::SendGroup { addrs: _ }) => {
                 // TODO fix
                 let mut data: Vec<u8> = vec![];
@@ -102,7 +102,7 @@ impl EspMeshClient {
                 val: ip.octets().as_mut_ptr(),
                 len: 4u16,
             })),
-            None => null(),
+            None => null_mut(),
         };
 
         unsafe {
@@ -110,7 +110,7 @@ impl EspMeshClient {
 
             drop(Box::from_raw(addr));
             drop(Box::from_raw(data));
-            drop(Box::from_raw(opt as *mut mesh_opt_t));
+            drop(Box::from_raw(opt));
 
             r
         }
