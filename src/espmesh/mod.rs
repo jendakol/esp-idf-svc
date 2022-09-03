@@ -1,19 +1,17 @@
 use alloc::boxed::Box;
 use std::io::Write;
+use std::mem::transmute;
 use std::net::Ipv4Addr;
 use std::ptr::{null, null_mut};
 use std::time::Duration;
 
 use ::log::info;
+use embedded_svc::wifi::AuthMethod;
 use esp_idf_hal::mutex::Mutex;
 use esp_idf_sys::*;
-use log::error;
+use log::{debug, error};
 
-use types::State;
-
-use crate::espmesh::types::{
-    MeshAddr, MeshConfig, MeshData, MeshOpt, MeshProto, MeshTos, RcvMessage,
-};
+pub use types::*;
 
 static TAKEN: Mutex<bool> = Mutex::new(false);
 
@@ -33,14 +31,46 @@ impl EspMeshClient {
             esp!(ESP_ERR_INVALID_STATE as i32)?;
         }
 
+        // info!("Initializing NVS flash");
+        // esp!(unsafe { nvs_flash_init() })?;
+        //
+        // info!("Initializing NETIF");
+        // esp!(unsafe { esp_netif_init() })?;
+        //
+        // info!("Initializing default event loop");
+        // esp!(unsafe { esp_event_loop_create_default() })?;
+
+        info!("Initializing NETIF for mesh");
+        // esp!(unsafe { esp_netif_create_default_wifi_mesh_netifs(null_mut(), null_mut()) })?;
+
         info!("Initializing ESP-WIFI-MESH");
         esp!(unsafe { esp_mesh_init() })?;
+
+        esp!(unsafe {
+            esp_event_handler_register(
+                MESH_EVENT,
+                ESP_EVENT_ANY_ID,
+                Some(mesh_event_handler),
+                null_mut(),
+            )
+        })?;
 
         *taken = true;
         Ok(Self {
             state: State::Stopped,
         })
     }
+}
+
+extern "C" fn mesh_event_handler(
+    _event_handler_arg: *mut c_types::c_void,
+    _event_base: esp_event_base_t,
+    event_id: i32,
+    _event_data: *mut c_types::c_void,
+) {
+    info!("Raw mesh event: {}", event_id);
+    let event: MeshEvent = unsafe { transmute(event_id as u8) };
+    info!("Mesh event: {:?}", event);
 }
 
 impl EspMeshClient {
@@ -64,18 +94,10 @@ impl EspMeshClient {
         &mut self,
         to: MeshAddr,
         data: MeshData,
-        flag: u16,
+        flag: u32,
         opt: Option<MeshOpt>,
     ) -> Result<(), EspError> {
-        let addr = Box::into_raw(Box::new(match to {
-            MeshAddr::Mac(raw) => mesh_addr_t { addr: raw },
-            MeshAddr::MIP { ip, port } => mesh_addr_t {
-                mip: mip_t {
-                    ip4: ip4_addr_t { addr: ip.into() },
-                    port,
-                },
-            },
-        }));
+        let addr = Box::into_raw(Box::new(to.into()));
 
         // to change to mut
         let mut data = data;
@@ -87,8 +109,8 @@ impl EspMeshClient {
             tos: data.tos as u32,
         }));
 
-        let opt = match opt {
-            Some(MeshOpt::SendGroup { addrs: _ }) => {
+        let opt = opt.map(|o| match o {
+            MeshOpt::SendGroup { addrs: _ } => {
                 // TODO fix
                 let mut data: Vec<u8> = vec![];
                 Box::into_raw(Box::new(mesh_opt_t {
@@ -97,16 +119,21 @@ impl EspMeshClient {
                     len: data.len() as u16,
                 }))
             }
-            Some(MeshOpt::RecvDsAddr { ip }) => Box::into_raw(Box::new(mesh_opt_t {
+            MeshOpt::RecvDsAddr { ip } => Box::into_raw(Box::new(mesh_opt_t {
                 type_: MESH_OPT_RECV_DS_ADDR as u8,
                 val: ip.octets().as_mut_ptr(),
                 len: 4u16,
             })),
-            None => null_mut(),
+        });
+
+        let (opt, opt_c) = if let Some(o) = opt {
+            (o, 1)
+        } else {
+            (null_mut(), 0)
         };
 
         unsafe {
-            let r = esp!(esp_mesh_send(addr, data, flag.into(), opt, 1));
+            let r = esp!(esp_mesh_send(addr, data, flag as i32, opt, opt_c));
 
             drop(Box::from_raw(addr));
             drop(Box::from_raw(data));
@@ -122,9 +149,20 @@ impl EspMeshClient {
 
     /// Receive a packet targeted to self over the mesh network
     pub fn recv(&mut self, timeout: Duration) -> Result<RcvMessage, EspError> {
-        let rcv_addr = null_mut() as *mut mesh_addr_t;
-        let rcv_data = Box::into_raw(Box::new(mesh_data_t::default()));
+        let rcv_addr = Box::into_raw(Box::new(mesh_addr_t::default()));
         let rcv_opt = Box::into_raw(Box::new(mesh_opt_t::default()));
+
+        let mut data_raw = Vec::<u8>::with_capacity(256);
+
+        let rcv_data = mesh_data_t {
+            data: data_raw.as_mut_ptr(),
+            size: 256,
+            ..Default::default()
+        };
+
+        std::mem::forget(data_raw);
+
+        let rcv_data = Box::into_raw(Box::new(rcv_data));
 
         let mut flag = 0;
 
@@ -135,15 +173,17 @@ impl EspMeshClient {
                 timeout.as_millis() as i32,
                 &mut flag,
                 rcv_opt,
-                1
+                0
             ));
+
+            info!("Raw recv: {:?}", r);
 
             // this is to fail if it should fail but still to release the memory potentially
             // allocated by the structs
 
             // TODO use
             let _rcv_addr = Box::from_raw(rcv_addr);
-            let rcv_data = Box::from_raw(rcv_data);
+            let rcv_data = Box::<mesh_data_t>::from_raw(rcv_data);
             let _rcv_opt = Box::from_raw(rcv_opt);
 
             r?;
@@ -161,16 +201,10 @@ impl EspMeshClient {
 
         let from: MeshAddr = MeshAddr::Mac([0, 0, 0, 0, 0, 0]);
 
-        let data = unsafe {
-            Vec::from_raw_parts(
-                rcv_data.data,
-                rcv_data.size as usize,
-                rcv_data.size as usize,
-            )
-        };
+        let data = unsafe { Vec::from_raw_parts(rcv_data.data, rcv_data.size as usize, 256) };
 
-        let proto: MeshProto = unsafe { std::mem::transmute(rcv_data.proto as u8) };
-        let tos: MeshTos = unsafe { std::mem::transmute(rcv_data.tos as u8) };
+        let proto: MeshProto = unsafe { transmute(rcv_data.proto as u8) };
+        let tos: MeshTos = unsafe { transmute(rcv_data.tos as u8) };
 
         Ok(RcvMessage {
             from,
@@ -201,23 +235,29 @@ impl EspMeshClient {
             nonmesh_max_connection: config.ap.nonmesh_max_connection,
         };
 
+        let password = config.router.password.as_bytes();
+
         let mut tmp = [0u8; 64];
         (&mut tmp as &mut [u8])
-            .write(config.router.password.as_bytes())
+            .write(password)
             .expect("Can't copy bytes in memory");
+
+        let ssid = config.router.ssid.as_bytes();
 
         let mut tmp2 = [0u8; 32];
         (&mut tmp2 as &mut [u8])
-            .write(config.router.ssid.as_bytes())
+            .write(ssid)
             .expect("Can't copy bytes in memory");
 
         let router = mesh_router_t {
             ssid: tmp2,
-            ssid_len: config.router.ssid.len() as u8,
+            ssid_len: ssid.len() as u8,
             password: tmp,
-            bssid: config.router.bssid,
+            bssid: config.router.bssid.unwrap_or([0, 0, 0, 0, 0, 0]),
             allow_router_switch: config.router.allow_router_switch,
         };
+
+        let crypto_funcs = Box::into_raw(Box::new(unsafe { g_wifi_default_mesh_crypto_funcs }));
 
         let cfg = Box::into_raw(Box::new(mesh_cfg_t {
             mesh_id,
@@ -225,7 +265,7 @@ impl EspMeshClient {
             router,
             channel: config.channel,
             allow_channel_switch: config.allow_channel_switch,
-            crypto_funcs: null(),
+            crypto_funcs,
         }));
 
         unsafe {
@@ -235,8 +275,49 @@ impl EspMeshClient {
         }
     }
 
+    pub fn set_ap_authmode(&mut self, mode: AuthMethod) -> Result<(), EspError> {
+        debug!("Setting WIFI auth mode: {:?}", mode);
+
+        esp!(unsafe { esp_mesh_set_ap_authmode(mode as u32) })
+    }
+
     pub fn set_max_layer(&mut self, max_layer: u16) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_set_max_layer(max_layer as i32) })
+    }
+
+    pub fn set_ap_connections(&mut self, max_connections: u8) -> Result<(), EspError> {
+        esp!(unsafe { esp_mesh_set_ap_connections(max_connections as i32) })
+    }
+
+    pub fn is_root(&mut self) -> bool {
+        unsafe { esp_mesh_is_root() }
+    }
+
+    pub fn get_routing_table_size(&mut self) -> u8 {
+        (unsafe { esp_mesh_get_routing_table_size() }) as u8
+    }
+
+    pub fn get_routing_table(&mut self) -> Result<(), EspError> {
+        let size = self.get_routing_table_size();
+        let mut data: Vec<mesh_addr_t> = Vec::with_capacity(size as usize);
+
+        let data_p = data.as_mut_ptr();
+
+        let mut out_len = 0;
+
+        esp!(unsafe { esp_mesh_get_routing_table(data_p, (size * 6) as i32, &mut out_len) })?;
+        std::mem::forget(data);
+
+        info!("Read routing table; size {}", out_len);
+
+        let data =
+            unsafe { Vec::<mesh_addr_t>::from_raw_parts(data_p, out_len as usize, size as usize) };
+
+        for addr in data.iter() {
+            info!("Routing: {:?}", unsafe { addr.addr });
+        }
+
+        Ok(())
     }
 }
 
