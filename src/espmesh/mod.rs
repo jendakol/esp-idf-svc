@@ -143,12 +143,12 @@ impl EspMeshClient {
         }
     }
 
-    pub fn send_block_time(d: Duration) -> Result<(), EspError> {
+    pub fn send_block_time(&mut self, d: Duration) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_send_block_time(d.as_millis() as u32) })
     }
 
     /// Receive a packet targeted to self over the mesh network
-    pub fn recv(&mut self, timeout: Duration) -> Result<RcvMessage, EspError> {
+    pub fn recv(&mut self, timeout: Duration) -> Result<Option<RcvMessage>, EspError> {
         let rcv_addr = Box::into_raw(Box::new(mesh_addr_t::default()));
         let rcv_opt = Box::into_raw(Box::new(mesh_opt_t::default()));
 
@@ -186,7 +186,11 @@ impl EspMeshClient {
             let rcv_data = Box::<mesh_data_t>::from_raw(rcv_data);
             let _rcv_opt = Box::from_raw(rcv_opt);
 
-            r?;
+            if r.is_err_and(|e| e.code() == ESP_ERR_MESH_TIMEOUT) {
+                return Ok(None);
+            } else {
+                r?;
+            }
 
             //     match *rcv_addr {
             //     mesh_addr_t { mip: mip_t } => MeshAddr::MIP {
@@ -206,11 +210,11 @@ impl EspMeshClient {
         let proto: MeshProto = unsafe { transmute(rcv_data.proto as u8) };
         let tos: MeshTos = unsafe { transmute(rcv_data.tos as u8) };
 
-        Ok(RcvMessage {
+        Ok(Some(RcvMessage {
             from,
             data: MeshData { data, proto, tos },
             flag: flag as u16,
-        })
+        }))
     }
 
     pub fn set_config(&mut self, config: MeshConfig) -> Result<(), EspError> {
@@ -297,7 +301,7 @@ impl EspMeshClient {
         (unsafe { esp_mesh_get_routing_table_size() }) as u8
     }
 
-    pub fn get_routing_table(&mut self) -> Result<(), EspError> {
+    pub fn get_routing_table(&mut self) -> Result<Vec<mesh_addr_t>, EspError> {
         let size = self.get_routing_table_size();
         let mut data: Vec<mesh_addr_t> = Vec::with_capacity(size as usize);
 
@@ -310,14 +314,9 @@ impl EspMeshClient {
 
         info!("Read routing table; size {}", out_len);
 
-        let data =
-            unsafe { Vec::<mesh_addr_t>::from_raw_parts(data_p, out_len as usize, size as usize) };
+        let data = unsafe { Vec::from_raw_parts(data_p, out_len as usize, size as usize) };
 
-        for addr in data.iter() {
-            info!("Routing: {:?}", unsafe { addr.addr });
-        }
-
-        Ok(())
+        Ok(data)
     }
 }
 

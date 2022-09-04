@@ -18,13 +18,14 @@ pub mod errors;
     esp_idf_comp_esp_wifi_enabled,
     esp_idf_comp_esp_event_enabled,
 ))]
-pub mod espnow;
+pub mod espmesh;
 #[cfg(all(
     feature = "alloc",
     esp_idf_comp_esp_eth_enabled,
     esp_idf_comp_esp_event_enabled,
+    esp_idf_comp_esp_netif_enabled
 ))]
-pub mod espmesh;
+pub mod espnow;
 #[cfg(all(
     feature = "alloc",
     esp_idf_comp_esp_eth_enabled,
