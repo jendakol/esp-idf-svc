@@ -182,3 +182,28 @@ pub enum MeshEvent {
     MeshEventPsDeviceDuty = 26,
     MeshEventMax = 27,
 }
+
+/// The number of packets pending in the queue waiting to be sent by the mesh stack
+#[derive(Debug, Copy, Clone)]
+pub struct TxPacketsPending {
+    /// to parent queue
+    pub to_parent: u32,
+    /// to parent (P2P) queue
+    pub to_parent_p2p: u32,
+    /// to child queue
+    pub to_child: u32,
+    /// to child (P2P) queue
+    pub to_child_p2p: u32,
+    /// management queue
+    pub mgmt: u32,
+    /// broadcast and multicast queue
+    pub broadcast: u32,
+}
+/// The number of packets available in the queue waiting to be received by applications
+#[derive(Debug, Copy, Clone)]
+pub struct RxPacketsPending {
+    /// to external DS
+    pub to_ds: u32,
+    /// to self
+    pub to_self: u32,
+}

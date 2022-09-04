@@ -68,7 +68,6 @@ extern "C" fn mesh_event_handler(
     event_id: i32,
     _event_data: *mut c_types::c_void,
 ) {
-    info!("Raw mesh event: {}", event_id);
     let event: MeshEvent = unsafe { transmute(event_id as u8) };
     info!("Mesh event: {:?}", event);
 }
@@ -317,6 +316,40 @@ impl EspMeshClient {
         let data = unsafe { Vec::from_raw_parts(data_p, out_len as usize, size as usize) };
 
         Ok(data)
+    }
+
+    pub fn get_tx_pending(&mut self) -> Result<TxPacketsPending, EspError> {
+        let r = Box::into_raw(Box::new(mesh_tx_pending_t::default()));
+        esp!(unsafe { esp_mesh_get_tx_pending(r) })?;
+        let r = unsafe { Box::from_raw(r) };
+
+        Ok(TxPacketsPending {
+            to_parent: r.to_parent as u32,
+            to_parent_p2p: r.to_parent_p2p as u32,
+            to_child: r.to_child as u32,
+            to_child_p2p: r.to_child_p2p as u32,
+            mgmt: r.mgmt as u32,
+            broadcast: r.broadcast as u32,
+        })
+    }
+
+    pub fn get_rx_pending(&mut self) -> Result<RxPacketsPending, EspError> {
+        let r = Box::into_raw(Box::new(mesh_rx_pending_t::default()));
+        esp!(unsafe { esp_mesh_get_rx_pending(r) })?;
+        let r = unsafe { Box::from_raw(r) };
+
+        Ok(RxPacketsPending {
+            to_ds: r.toDS as u32,
+            to_self: r.toSelf as u32,
+        })
+    }
+
+    pub fn enable_ps(&mut self) -> Result<(), EspError> {
+        esp!(unsafe { esp_mesh_enable_ps() })
+    }
+
+    pub fn disable_ps(&mut self) -> Result<(), EspError> {
+        esp!(unsafe { esp_mesh_disable_ps() })
     }
 }
 
