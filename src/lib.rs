@@ -1,6 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![feature(cfg_version)]
 #![feature(const_btree_new)]
+#![feature(is_some_with)]
 #![feature(generic_associated_types)] // For mutex, http, http::client, http::server, ota
 #![cfg_attr(version("1.61"), allow(deprecated_where_clause_location))]
 #![allow(unused_imports)]
@@ -15,14 +16,14 @@ pub mod errors;
     esp_idf_comp_esp_event_enabled,
     esp_idf_comp_esp_netif_enabled
 ))]
-pub mod espnow;
+pub mod espmesh;
 #[cfg(all(
     feature = "alloc",
     esp_idf_comp_esp_eth_enabled,
     esp_idf_comp_esp_event_enabled,
     esp_idf_comp_esp_netif_enabled
 ))]
-pub mod espmesh;
+pub mod espnow;
 #[cfg(all(
     feature = "alloc",
     esp_idf_comp_esp_eth_enabled,
