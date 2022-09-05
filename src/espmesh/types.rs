@@ -7,13 +7,29 @@ use esp_idf_hal::mutex::Mutex;
 use esp_idf_sys::*;
 use log::error;
 
-#[derive(Debug)]
+macro_rules! simple_enum_mapping {
+    ($rust:ident <=> $c_enum:ident) => {
+        impl From<$rust> for $c_enum {
+            fn from(t: $rust) -> Self {
+                t as u32
+            }
+        }
+
+        impl From<$c_enum> for $rust {
+            fn from(t: $c_enum) -> Self {
+                unsafe { transmute(t as u8) }
+            }
+        }
+    };
+}
+
+#[derive(Debug, Copy, Clone)]
 pub enum State {
     Started,
     Stopped,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub enum MeshAddr {
     Mac([u8; 6]),
     MIP { ip: Ipv4Addr, port: u16 },
@@ -34,6 +50,7 @@ impl From<MeshAddr> for mesh_addr_t {
 }
 
 /// Protocol of transmitted application data.
+#[derive(Debug, Copy, Clone)]
 pub enum MeshProto {
     Binary = 0,
     Http = 1,
@@ -45,7 +62,10 @@ pub enum MeshProto {
     Sta = 5,
 }
 
+simple_enum_mapping!(MeshProto <=> mesh_proto_t);
+
 /// For reliable transmission, mesh stack provides three type of services.
+#[derive(Debug, Copy, Clone)]
 pub enum MeshTos {
     /// provide P2P (point-to-point) retransmission on mesh stack by default
     P2P = 0,
@@ -55,12 +75,16 @@ pub enum MeshTos {
     DEF = 2,
 }
 
+simple_enum_mapping!(MeshTos <=> mesh_tos_t);
+
+#[derive(Debug, Clone)]
 pub struct MeshData {
     pub data: Vec<u8>,
     pub proto: MeshProto,
     pub tos: MeshTos,
 }
 
+#[derive(Debug, Clone)]
 pub enum MeshOpt {
     /// data transmission by group
     SendGroup { addrs: Vec<MeshAddr> },
@@ -68,6 +92,7 @@ pub enum MeshOpt {
     RecvDsAddr { ip: Ipv4Addr },
 }
 
+#[derive(Debug, Clone)]
 pub struct RcvMessage {
     pub from: MeshAddr,
     pub data: MeshData,
@@ -75,6 +100,7 @@ pub struct RcvMessage {
 }
 
 /// Mesh router configuration
+#[derive(Debug, Copy, Clone)]
 pub struct MeshRouterConfig {
     /// SSID
     pub ssid: &'static str,
@@ -91,6 +117,7 @@ pub struct MeshRouterConfig {
     pub allow_router_switch: bool,
 }
 
+#[derive(Debug, Copy, Clone)]
 pub struct MeshApConfig {
     // mesh softAP password
     pub password: &'static str,
@@ -101,13 +128,14 @@ pub struct MeshApConfig {
 }
 
 /// Mesh initialization configuration
+#[derive(Debug, Copy, Clone)]
 pub struct MeshConfig {
     pub channel: u8,
     /// if this value is set, when \"fail\" (mesh_attempts_t) times is reached, device will change to
     /// a full channel scan for a network that could join. The default value is false.
     pub allow_channel_switch: bool,
     /// mesh network identification
-    pub mesh_id: MeshAddr,
+    pub mesh_id: [u8; 6],
     /// router configuration
     pub router: MeshRouterConfig,
     /// mesh softAP configuration
@@ -116,72 +144,78 @@ pub struct MeshConfig {
     // pub crypto_funcs: *const mesh_crypto_funcs_t,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum MeshEvent {
     /// mesh is started
-    MeshEventStarted = 0,
+    Started = 0,
     /// mesh is stopped
-    MeshEventStopped = 1,
+    Stopped = 1,
     /// channel switch
-    MeshEventChannelSwitch = 2,
+    ChannelSwitch = 2,
     /// a child is connected on softAP interface
-    MeshEventChildConnected = 3,
+    ChildConnected = 3,
     /// a child is disconnected on softAP interface
-    MeshEventChildDisconnected = 4,
+    ChildDisconnected = 4,
     /// routing table is changed by adding newly joined children
-    MeshEventRoutingTableAdd = 5,
+    RoutingTableAdd = 5,
     /// routing table is changed by removing leave children
-    MeshEventRoutingTableRemove = 6,
+    RoutingTableRemove = 6,
     /// parent is connected on station interface
-    MeshEventParentConnected = 7,
+    ParentConnected = 7,
     /// parent is disconnected on station interface
-    MeshEventParentDisconnected = 8,
+    ParentDisconnected = 8,
     /// no parent found
-    MeshEventNoParentFound = 9,
+    NoParentFound = 9,
     /// layer changes over the mesh network
-    MeshEventLayerChange = 10,
+    LayerChange = 10,
     /// state represents whether the root is able to access external IP network
-    MeshEventTodsState = 11,
+    TodsState = 11,
     /// the process of voting a new root is started either by children or by the root
-    MeshEventVoteStarted = 12,
+    VoteStarted = 12,
     /// the process of voting a new root is stopped
-    MeshEventVoteStopped = 13,
+    VoteStopped = 13,
     /// the root address is obtained. It is posted by mesh stack automatically.
-    MeshEventRootAddress = 14,
+    RootAddress = 14,
     /// root switch request sent from a new voted root candidate
-    MeshEventRootSwitchReq = 15,
+    RootSwitchReq = 15,
     /// root switch acknowledgment responds the above request sent from current root
-    MeshEventRootSwitchAck = 16,
+    RootSwitchAck = 16,
     /// the root is asked yield by a more powerful existing root. If self organized is disabled
     /// and this device is specified to be a root by users, users should set a new parent
     /// for this device. if self organized is enabled, this device will find a new parent
     /// by itself, users could ignore this event.
-    MeshEventRootAskedYield = 17,
+    RootAskedYield = 17,
     /// when devices join a network, if the setting of Fixed Root for one device is different
     /// from that of its parent, the device will update the setting the same as its parent's.
     /// Fixed Root Setting of each device is variable as that setting changes of the root.
-    MeshEventRootFixed = 18,
+    RootFixed = 18,
     /// if self-organized networking is disabled, user can call esp_wifi_scan_start() to trigger
     /// this event, and add the corresponding scan done handler in this event.
-    MeshEventScanDone = 19,
+    ScanDone = 19,
     /// network state, such as whether current mesh network has a root.
-    MeshEventNetworkState = 20,
+    NetworkState = 20,
     /// the root stops reconnecting to the router and non-root devices stop reconnecting to their parents.
-    MeshEventStopReconnection = 21,
+    StopReconnection = 21,
     /// when the channel field in mesh configuration is set to zero, mesh stack will perform a
     /// full channel scan to find a mesh network that can join, and return the channel value
     /// after finding it.
-    MeshEventFindNetwork = 22,
+    FindNetwork = 22,
     /// if users specify BSSID of the router in mesh configuration, when the root connects to another
     /// router with the same SSID, this event will be posted and the new router information is attached.
-    MeshEventRouterSwitch = 23,
+    RouterSwitch = 23,
     /// parent duty
-    MeshEventPsParentDuty = 24,
+    PsParentDuty = 24,
     /// child duty
-    MeshEventPsChildDuty = 25,
+    PsChildDuty = 25,
     /// device duty
-    MeshEventPsDeviceDuty = 26,
-    MeshEventMax = 27,
+    PsDeviceDuty = 26,
+    Max = 27,
+}
+
+impl From<i32> for MeshEvent {
+    fn from(id: i32) -> Self {
+        unsafe { transmute(id as u8) }
+    }
 }
 
 /// The number of packets pending in the queue waiting to be sent by the mesh stack
@@ -211,21 +245,25 @@ pub struct RxPacketsPending {
 
 #[derive(Debug, Copy, Clone)]
 pub enum MeshTopology {
-    Tree,
-    Chain,
+    Tree = 0,
+    Chain = 1,
 }
 
-impl From<MeshTopology> for esp_mesh_topology_t {
-    fn from(t: MeshTopology) -> Self {
-        match t {
-            MeshTopology::Tree => esp_mesh_topology_t_MESH_TOPO_TREE,
-            MeshTopology::Chain => esp_mesh_topology_t_MESH_TOPO_CHAIN,
-        }
-    }
+simple_enum_mapping!(MeshTopology <=> esp_mesh_topology_t);
+
+/// Device (mesh node) type
+#[derive(Debug, Copy, Clone)]
+pub enum MeshNodeType {
+    /// hasn't joined the mesh network yet
+    Idle = 0,
+    /// the only sink of the mesh network. Has the ability to access external IP network
+    Root = 1,
+    /// intermediate device. Has the ability to forward packets over the mesh network
+    Node = 2,
+    /// has no forwarding ability
+    Leaf = 3,
+    /// connect to router with a standalone Wi-Fi station mode, no network expansion capability
+    Sta = 4,
 }
 
-impl From<esp_mesh_topology_t> for MeshTopology {
-    fn from(t: esp_mesh_topology_t) -> Self {
-        unsafe { transmute(t as u8) }
-    }
-}
+simple_enum_mapping!(MeshNodeType <=> mesh_type_t);

@@ -68,7 +68,7 @@ extern "C" fn mesh_event_handler(
     event_id: i32,
     _event_data: *mut c_types::c_void,
 ) {
-    let event: MeshEvent = unsafe { transmute(event_id as u8) };
+    let event = MeshEvent::from(event_id);
     info!("Mesh event: {:?}", event);
 }
 
@@ -104,8 +104,8 @@ impl EspMeshClient {
         let data = Box::into_raw(Box::new(mesh_data_t {
             data: data.data.as_mut_ptr(),
             size: data.data.len() as u16,
-            proto: data.proto as u32,
-            tos: data.tos as u32,
+            proto: data.proto.into(),
+            tos: data.tos.into(),
         }));
 
         let opt = opt.map(|o| match o {
@@ -216,21 +216,22 @@ impl EspMeshClient {
         }))
     }
 
+    #[allow(non_snake_case)]
+    pub fn recv_toDS(&mut self) -> Result<(), EspError> {
+        todo!()
+    }
+
     pub fn set_config(&mut self, config: MeshConfig) -> Result<(), EspError> {
-        let mesh_id = match config.mesh_id {
-            MeshAddr::Mac(raw) => mesh_addr_t { addr: raw },
-            MeshAddr::MIP { ip, port } => mesh_addr_t {
-                mip: mip_t {
-                    ip4: ip4_addr_t { addr: ip.into() },
-                    port,
-                },
-            },
+        let mesh_id = mesh_addr_t {
+            addr: config.mesh_id,
         };
 
         let mut tmp = [0u8; 64];
         (&mut tmp as &mut [u8])
-            .write(config.ap.password.as_bytes())
+            .write_all(config.ap.password.as_bytes())
             .expect("Can't copy bytes in memory");
+
+        // TODO check max connections
 
         let mesh_ap = mesh_ap_cfg_t {
             password: tmp,
@@ -242,14 +243,14 @@ impl EspMeshClient {
 
         let mut tmp = [0u8; 64];
         (&mut tmp as &mut [u8])
-            .write(password)
+            .write_all(password)
             .expect("Can't copy bytes in memory");
 
         let ssid = config.router.ssid.as_bytes();
 
         let mut tmp2 = [0u8; 32];
         (&mut tmp2 as &mut [u8])
-            .write(ssid)
+            .write_all(ssid)
             .expect("Can't copy bytes in memory");
 
         let router = mesh_router_t {
@@ -278,18 +279,100 @@ impl EspMeshClient {
         }
     }
 
-    pub fn set_ap_authmode(&mut self, mode: AuthMethod) -> Result<(), EspError> {
-        debug!("Setting WIFI auth mode: {:?}", mode);
+    pub fn get_config(&self) -> Result<MeshConfig, EspError> {
+        todo!()
+    }
 
-        esp!(unsafe { esp_mesh_set_ap_authmode(mode as u32) })
+    /// Set router config.  
+    /// This API is used to dynamically modify the router configuration after mesh is configured.
+    pub fn set_router(&self, _cfg: MeshRouterConfig) -> Result<MeshConfig, EspError> {
+        todo!()
+    }
+
+    pub fn get_router(&self) -> Result<MeshRouterConfig, EspError> {
+        todo!()
+    }
+
+    /// Set mesh network ID.  
+    /// This API is used to dynamically modify the router configuration after mesh is configured.
+    pub fn set_id(&self, _id: [u8; 6]) -> Result<(), EspError> {
+        todo!()
+    }
+
+    /// Get mesh network ID.
+    pub fn get_id(&self) -> Result<[u8; 6], EspError> {
+        todo!()
+    }
+
+    /// Designate device type over the mesh network.
+    ///
+    /// - `Idle`: designates a device as a self-organized node for a mesh network
+    /// - `Root`: designates the root node for a mesh network
+    /// - `Node`: designates a device as an intermediate device
+    /// - `Leaf`: designates a device as a standalone Wi-Fi station that connects to a parent
+    /// - `Sta`: designates a device as a standalone Wi-Fi station that connects to a router
+    pub fn set_type(&mut self, t: MeshNodeType) -> Result<(), EspError> {
+        esp!(unsafe { esp_mesh_set_type(t.into()) })
+    }
+
+    /// Get device type over mesh network.  
+    /// This API shall be called after having received the event `ParentConnected`.
+    pub fn get_type(&self) -> MeshNodeType {
+        unsafe { esp_mesh_get_type() }.into()
     }
 
     pub fn set_max_layer(&mut self, max_layer: u16) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_set_max_layer(max_layer as i32) })
     }
 
+    pub fn get_max_layer(&self) -> u16 {
+        (unsafe { esp_mesh_get_max_layer() }) as u16
+    }
+
+    /// Set mesh softAP password.  
+    /// This API shall be called before mesh is started.
+    pub fn set_ap_password(&mut self, pass: &str) -> Result<(), EspError> {
+        esp!(unsafe { esp_mesh_set_ap_password(pass.as_ptr(), pass.len() as i32) })
+    }
+
+    /// Set mesh softAP authentication mode.
+    /// This API shall be called before mesh is started.
+    pub fn set_ap_authmode(&mut self, mode: AuthMethod) -> Result<(), EspError> {
+        esp!(unsafe { esp_mesh_set_ap_authmode(mode as u32) })
+    }
+
+    pub fn get_ap_authmode(&self) -> AuthMethod {
+        unsafe { transmute(esp_mesh_get_ap_authmode() as u8) }
+    }
+
+    /// Set mesh max connection value.  
+    /// Set mesh softAP max connection = mesh max connection + non-mesh max connection  
+    /// This API shall be called before mesh is started.
     pub fn set_ap_connections(&mut self, max_connections: u8) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_set_ap_connections(max_connections as i32) })
+    }
+
+    pub fn get_ap_connections(&self) -> u8 {
+        (unsafe { esp_mesh_get_ap_connections() }) as u8
+    }
+
+    pub fn get_non_mesh_connections(&self) -> u8 {
+        (unsafe { esp_mesh_get_non_mesh_connections() }) as u8
+    }
+
+    /// Get current layer value over the mesh network.  
+    /// This API shall be called after having received the event `ParentConnected`.
+    pub fn get_layer(&self) -> u16 {
+        (unsafe { esp_mesh_get_layer() }) as u16
+    }
+
+    /// Get the parent BSSID.  
+    /// This API shall be called after having received the event `ParentConnected`.
+    pub fn get_parent_bssid(&self) -> Result<[u8; 6], EspError> {
+        let raw = Box::into_raw(Box::new(mesh_addr_t::default()));
+        esp!(unsafe { esp_mesh_get_parent_bssid(raw) })?;
+        let raw = unsafe { Box::from_raw(raw).addr };
+        Ok(raw)
     }
 
     pub fn is_root(&self) -> bool {
