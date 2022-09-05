@@ -292,15 +292,15 @@ impl EspMeshClient {
         esp!(unsafe { esp_mesh_set_ap_connections(max_connections as i32) })
     }
 
-    pub fn is_root(&mut self) -> bool {
+    pub fn is_root(&self) -> bool {
         unsafe { esp_mesh_is_root() }
     }
 
-    pub fn get_routing_table_size(&mut self) -> u8 {
+    pub fn get_routing_table_size(&self) -> u8 {
         (unsafe { esp_mesh_get_routing_table_size() }) as u8
     }
 
-    pub fn get_routing_table(&mut self) -> Result<Vec<mesh_addr_t>, EspError> {
+    pub fn get_routing_table(&self) -> Result<Vec<mesh_addr_t>, EspError> {
         let size = self.get_routing_table_size();
         let mut data: Vec<mesh_addr_t> = Vec::with_capacity(size as usize);
 
@@ -318,7 +318,7 @@ impl EspMeshClient {
         Ok(data)
     }
 
-    pub fn get_tx_pending(&mut self) -> Result<TxPacketsPending, EspError> {
+    pub fn get_tx_pending(&self) -> Result<TxPacketsPending, EspError> {
         let r = Box::into_raw(Box::new(mesh_tx_pending_t::default()));
         esp!(unsafe { esp_mesh_get_tx_pending(r) })?;
         let r = unsafe { Box::from_raw(r) };
@@ -333,7 +333,7 @@ impl EspMeshClient {
         })
     }
 
-    pub fn get_rx_pending(&mut self) -> Result<RxPacketsPending, EspError> {
+    pub fn get_rx_pending(&self) -> Result<RxPacketsPending, EspError> {
         let r = Box::into_raw(Box::new(mesh_rx_pending_t::default()));
         esp!(unsafe { esp_mesh_get_rx_pending(r) })?;
         let r = unsafe { Box::from_raw(r) };
@@ -350,6 +350,28 @@ impl EspMeshClient {
 
     pub fn disable_ps(&mut self) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_disable_ps() })
+    }
+
+    pub fn is_ps_enabled(&self) -> bool {
+        unsafe { esp_mesh_is_ps_enabled() }
+    }
+
+    /// Check whether the device is in active state.
+    ///
+    /// If the device is not in active state, it will neither transmit nor receive frames.
+    pub fn is_device_active(&self) -> bool {
+        unsafe { esp_mesh_is_device_active() }
+    }
+
+    /// Set mesh topology. The default value is Tree.
+    /// Chain topology supports up to 1000 layers.
+    pub fn set_topology(&mut self, topo: MeshTopology) -> Result<(), EspError> {
+        esp!(unsafe { esp_mesh_set_topology(topo.into()) })
+    }
+
+    /// Get mesh topology.
+    pub fn get_topology(&self) -> MeshTopology {
+        unsafe { esp_mesh_get_topology() }.into()
     }
 }
 
