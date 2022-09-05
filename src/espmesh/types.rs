@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use std::mem::transmute;
 use std::net::Ipv4Addr;
 
 use ::log::info;
@@ -206,4 +207,25 @@ pub struct RxPacketsPending {
     pub to_ds: u32,
     /// to self
     pub to_self: u32,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum MeshTopology {
+    Tree,
+    Chain,
+}
+
+impl From<MeshTopology> for esp_mesh_topology_t {
+    fn from(t: MeshTopology) -> Self {
+        match t {
+            MeshTopology::Tree => esp_mesh_topology_t_MESH_TOPO_TREE,
+            MeshTopology::Chain => esp_mesh_topology_t_MESH_TOPO_CHAIN,
+        }
+    }
+}
+
+impl From<esp_mesh_topology_t> for MeshTopology {
+    fn from(t: esp_mesh_topology_t) -> Self {
+        unsafe { transmute(t as u8) }
+    }
 }
