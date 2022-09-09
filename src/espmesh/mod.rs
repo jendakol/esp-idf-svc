@@ -1,8 +1,13 @@
 use alloc::boxed::Box;
+use core::fmt::{Debug, Formatter};
 use std::io::Write;
+use std::mem;
 use std::mem::transmute;
 use std::net::Ipv4Addr;
+use std::ops::Deref;
 use std::ptr::{null, null_mut};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use ::log::info;
@@ -10,38 +15,42 @@ use embedded_svc::wifi::AuthMethod;
 use esp_idf_hal::mutex::Mutex;
 use esp_idf_sys::*;
 use log::{debug, error};
+use once_cell::sync::Lazy;
+use pub_sub::{PubSub, Subscription};
 
 pub use types::*;
 
 static TAKEN: Mutex<bool> = Mutex::new(false);
 
+static EVENT_CHANNEL: Lazy<PubSub<MeshEvent>> = Lazy::new(|| PubSub::new());
+
 mod types;
 
-#[derive(Debug)]
 pub struct EspMeshClient {
     state: State,
+    event_handler: Arc<Box<dyn Fn(MeshEvent) -> () + Send + Sync>>,
+}
+
+impl Debug for EspMeshClient {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EspMeshClient")
+            .field("state", &self.state)
+            .finish()
+    }
 }
 
 impl EspMeshClient {
-    pub fn new() -> Result<Self, EspError> {
+    pub fn new(
+        event_handler: Box<dyn Fn(MeshEvent) -> () + Send + Sync>,
+    ) -> Result<Self, EspError> {
         let mut taken = TAKEN.lock();
 
         if *taken {
-            error!("There must exist only a single ESP-WIFI-MESH client at one moment!");
+            error!("There must exist only a single ESP-WIFI-MESH client at the moment!");
             esp!(ESP_ERR_INVALID_STATE as i32)?;
         }
 
-        // info!("Initializing NVS flash");
-        // esp!(unsafe { nvs_flash_init() })?;
-        //
-        // info!("Initializing NETIF");
-        // esp!(unsafe { esp_netif_init() })?;
-        //
-        // info!("Initializing default event loop");
-        // esp!(unsafe { esp_event_loop_create_default() })?;
-
-        info!("Initializing NETIF for mesh");
-        // esp!(unsafe { esp_netif_create_default_wifi_mesh_netifs(null_mut(), null_mut()) })?;
+        *taken = true;
 
         info!("Initializing ESP-WIFI-MESH");
         esp!(unsafe { esp_mesh_init() })?;
@@ -55,9 +64,9 @@ impl EspMeshClient {
             )
         })?;
 
-        *taken = true;
         Ok(Self {
             state: State::Stopped,
+            event_handler: Arc::new(event_handler),
         })
     }
 }
@@ -69,20 +78,68 @@ extern "C" fn mesh_event_handler(
     _event_data: *mut c_types::c_void,
 ) {
     let event = MeshEvent::from(event_id);
-    info!("Mesh event: {:?}", event);
+    debug!("Mesh event: {:?}", event);
+    EVENT_CHANNEL.send(event).expect("Event channel was closed");
 }
 
 impl EspMeshClient {
+    /// Start mesh.
+    ///
+    /// - Initialize mesh IE.
+    /// - Start mesh network management service.
+    /// - Create TX and RX queues according to the configuration.
+    /// - Register mesh packets receive callback.
+    ///
+    /// Does nothing if the mesh is already started.
     pub fn start(&mut self) -> Result<(), EspError> {
+        if self.is_started() {
+            // make it idempotent
+            return Ok(());
+        }
+
+        let event_handler = Arc::clone(&self.event_handler);
+
+        let sub: Subscription<MeshEvent> = EVENT_CHANNEL.subscribe();
+
+        let s = sub.clone();
+        let event_loop = std::thread::spawn(move || {
+            for event in s.iter() {
+                (event_handler)(event);
+            }
+        });
+
         esp!(unsafe { esp_mesh_start() })?;
-        self.state = State::Started;
+
+        self.state = State::Started(sub, event_loop);
         Ok(())
     }
 
+    /// Stop mesh.
+    ///
+    /// - Deinitialize mesh IE.
+    /// - Disconnect with current parent.
+    /// - Disassociate all currently associated children.
+    /// - Stop mesh network management service.
+    /// - Unregister mesh packets receive callback.
+    /// - Delete TX and RX queues.
+    /// - Release resources.
+    /// - Restore Wi-Fi softAP to default settings if Wi-Fi dual mode is enabled.
+    /// - Set Wi-Fi Power Save type to WIFI_PS_NONE.
+    ///
+    /// Does nothing if the mesh is already stopped.
     pub fn stop(&mut self) -> Result<(), EspError> {
-        esp!(unsafe { esp_mesh_stop() })?;
-        self.state = State::Stopped;
-        Ok(())
+        if let State::Started(_sub, th) = mem::replace(&mut self.state, State::Stopped) {
+            // cancel even handling (sub is dropped automatically)
+            th.join().expect("Could not join callback thread");
+            esp!(unsafe { esp_mesh_stop() })
+        } else {
+            // make it idempotent
+            return Ok(());
+        }
+    }
+
+    pub fn is_started(&self) -> bool {
+        matches!(self.state, State::Started(_, _))
     }
 
     /// Send a packet over the mesh network:
