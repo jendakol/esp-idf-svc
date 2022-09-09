@@ -1,11 +1,14 @@
 use alloc::boxed::Box;
+use core::fmt::{Debug, Formatter, Write};
 use std::mem::transmute;
 use std::net::Ipv4Addr;
+use std::thread::JoinHandle;
 
 use ::log::info;
 use esp_idf_hal::mutex::Mutex;
 use esp_idf_sys::*;
 use log::error;
+use pub_sub::Subscription;
 
 macro_rules! simple_enum_mapping {
     ($rust:ident <=> $c_enum:ident) => {
@@ -23,10 +26,18 @@ macro_rules! simple_enum_mapping {
     };
 }
 
-#[derive(Debug, Copy, Clone)]
 pub enum State {
-    Started,
+    Started(Subscription<MeshEvent>, JoinHandle<()>),
     Stopped,
+}
+
+impl Debug for State {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            State::Started(_, _) => f.write_str("Started"),
+            State::Stopped => f.write_str("Stopped"),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
