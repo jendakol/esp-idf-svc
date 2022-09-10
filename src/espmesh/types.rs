@@ -130,11 +130,11 @@ pub struct MeshRouterConfig {
 
 #[derive(Debug, Copy, Clone)]
 pub struct MeshApConfig {
-    // mesh softAP password
+    /// mesh softAP password
     pub password: &'static str,
-    // max mesh connections
+    /// max mesh connections
     pub max_connection: u8,
-    // max non-mesh connections
+    /// max non-mesh connections
     pub nonmesh_max_connection: u8,
 }
 
@@ -153,6 +153,19 @@ pub struct MeshConfig {
     pub ap: MeshApConfig,
     // /// crypto functions
     // pub crypto_funcs: *const mesh_crypto_funcs_t,
+}
+
+/// Attempts configuration for mesh self-organized networking
+#[derive(Debug, Copy, Clone)]
+pub struct MeshAttemptsConfig {
+    /// minimum scan times before being a root, default:10
+    pub scan: u8,
+    /// max vote times in self-healing, default:1000
+    pub vote: u8,
+    /// parent selection fail times, if the scan times reach this value, device will disconnect with associated children and join self-healing. default:60
+    pub fail: u8,
+    /// acceptable times of parent networking IE change before update its own networking IE. default:3
+    pub monitor_ie: u8,
 }
 
 #[derive(Debug, Copy, Clone)]
