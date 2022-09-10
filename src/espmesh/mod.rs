@@ -477,9 +477,9 @@ impl EspMeshClient {
         let mut out_len = 0;
 
         esp!(unsafe { esp_mesh_get_routing_table(data_p, (size * 6) as i32, &mut out_len) })?;
-        std::mem::forget(data);
+        mem::forget(data);
 
-        info!("Read routing table; size {}", out_len);
+        debug!("Read routing table; size {}", out_len);
 
         let data = unsafe { Vec::from_raw_parts(data_p, out_len as usize, size as usize) };
 
