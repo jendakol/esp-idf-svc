@@ -26,18 +26,10 @@ macro_rules! simple_enum_mapping {
     };
 }
 
+#[derive(Copy, Clone, Debug)]
 pub enum State {
-    Started(Mutex<(Subscription<MeshEvent>, JoinHandle<()>, Arc<Mutex<bool>>)>),
+    Started,
     Stopped,
-}
-
-impl Debug for State {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        match self {
-            State::Started(_) => f.write_str("Started"),
-            State::Stopped => f.write_str("Stopped"),
-        }
-    }
 }
 
 #[derive(Debug, Copy, Clone)]

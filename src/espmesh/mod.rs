@@ -23,13 +23,12 @@ pub use types::*;
 type GlobalClientInstance = Mutex<Option<Arc<RwLock<EspMeshClientInner>>>>;
 
 static INSTANCE: Lazy<GlobalClientInstance> = Lazy::new(|| Default::default());
-static EVENT_CHANNEL: Lazy<PubSub<MeshEvent>> = Lazy::new(PubSub::new);
+static EVENTS_CHANNEL: Lazy<PubSub<MeshEvent>> = Lazy::new(PubSub::new);
 
 mod types;
 
 struct EspMeshClientInner {
     state: State,
-    event_handlers: Vec<Box<dyn Fn(MeshEvent) + Send + Sync>>,
 }
 
 #[derive(Clone)]
@@ -39,22 +38,23 @@ pub struct EspMeshClient {
 
 impl Debug for EspMeshClient {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        let state = &self
-            .inner
-            .read()
-            .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance")
-            .state;
+        let state = {
+            let lock = &self
+                .inner
+                .read()
+                .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance");
+
+            *&lock.state
+        };
 
         f.debug_struct("EspMeshClient")
-            .field("state", state)
+            .field("state", &state)
             .finish()
     }
 }
 
 impl EspMeshClient {
-    pub fn get_instance(
-        event_handler: Box<dyn Fn(MeshEvent) + Send + Sync>,
-    ) -> Result<Self, EspError> {
+    pub fn get_instance() -> Result<Self, EspError> {
         let instance = &mut (*INSTANCE
             .lock()
             .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance"));
@@ -71,12 +71,6 @@ impl EspMeshClient {
         };
 
         debug!("ESP-WIFI-MESH initialized");
-
-        inner
-            .write()
-            .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance")
-            .event_handlers
-            .push(event_handler);
 
         Ok(EspMeshClient { inner })
     }
@@ -96,7 +90,6 @@ impl EspMeshClient {
 
         Ok(EspMeshClientInner {
             state: State::Stopped,
-            event_handlers: Vec::new(),
         })
     }
 }
@@ -109,10 +102,17 @@ extern "C" fn mesh_event_handler(
 ) {
     let event = MeshEvent::from(event_id);
     debug!("Mesh event: {:?}", event);
-    EVENT_CHANNEL.send(event).expect("Event channel was closed");
+    EVENTS_CHANNEL
+        .send(event)
+        .expect("Event channel was closed");
 }
 
 impl EspMeshClient {
+    /// Gets a subscription for all mesh events.
+    pub fn mesh_event_subscription(&self) -> Subscription<MeshEvent> {
+        EVENTS_CHANNEL.subscribe()
+    }
+
     /// Start mesh.
     ///
     /// - Initialize mesh IE.
@@ -122,47 +122,17 @@ impl EspMeshClient {
     ///
     /// Does nothing if the mesh is already started.
     pub fn start(&mut self) -> Result<(), EspError> {
-        if self.is_started() {
-            // make it idempotent
-            return Ok(());
-        }
-
-        let sub: Subscription<MeshEvent> = EVENT_CHANNEL.subscribe();
-        let stopping = Arc::new(Mutex::new(false));
-
-        let inner_copy = Arc::clone(&self.inner);
-        let sub_copy = sub.clone();
-        let stopping_copy = Arc::clone(&stopping);
-
-        let events_loop = std::thread::spawn(move || {
-            while !*stopping_copy.lock().expect("Poisoned stop-flag") {
-                match sub_copy.try_recv() {
-                    Ok(event) => {
-                        let event_handlers = &inner_copy
-                            .read()
-                            .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance")
-                            .event_handlers;
-
-                        for handler in event_handlers.iter() {
-                            (handler)(event);
-                        }
-                    }
-                    Err(TryRecvError::Empty) => (), // no event
-                    Err(TryRecvError::Disconnected) => {
-                        panic!("Event passing channel was disconnected!")
-                    }
-                }
-            }
-        });
-
-        esp!(unsafe { esp_mesh_start() })?;
-
-        let inner = &mut *self
+        let mut state = &mut self
             .inner
             .write()
-            .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance");
+            .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance")
+            .state;
 
-        inner.state = State::Started(Mutex::new((sub, events_loop, stopping)));
+        if let State::Stopped = mem::replace(state.deref_mut(), State::Started) {
+            esp!(unsafe { esp_mesh_start() })?;
+        };
+        // else nothing - so it's idempotent
+
         Ok(())
     }
 
@@ -186,16 +156,7 @@ impl EspMeshClient {
             .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance")
             .state;
 
-        if let State::Started(lock) = mem::replace(state.deref_mut(), State::Stopped) {
-            let (_sub, th, stopping) = lock
-                .into_inner()
-                .expect("Poisoned mutex keeping ESP-WIFI-MESH instance");
-
-            *(stopping.lock().expect("Poisoned stop-flag")) = true;
-
-            // cancel even handling (sub is dropped automatically)
-            th.join().expect("Could not join callback thread");
-
+        if let State::Started = mem::replace(state.deref_mut(), State::Stopped) {
             esp!(unsafe { esp_mesh_stop() })?;
         };
         // else nothing - so it's idempotent
@@ -209,7 +170,7 @@ impl EspMeshClient {
                 .read()
                 .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance")
                 .state,
-            State::Started(_)
+            State::Started
         )
     }
 
