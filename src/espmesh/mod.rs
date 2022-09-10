@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use ::log::info;
-use embedded_svc::wifi::AuthMethod;
+pub use embedded_svc::wifi::AuthMethod;
 use esp_idf_hal::mutex::Mutex;
 use esp_idf_sys::*;
 use log::{debug, error};
@@ -199,6 +199,7 @@ impl EspMeshClient {
         }
     }
 
+    /// Set blocking time of `send()`
     pub fn send_block_time(&mut self, d: Duration) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_send_block_time(d.as_millis() as u32) })
     }
@@ -378,6 +379,33 @@ impl EspMeshClient {
         unsafe { esp_mesh_get_type() }.into()
     }
 
+    /// Set attempts for mesh self-organized networking
+    pub fn set_attempts(&mut self, config: MeshAttemptsConfig) -> Result<(), EspError> {
+        let raw = Box::into_raw(Box::new(mesh_attempts_t {
+            scan: config.scan as i32,
+            vote: config.vote as i32,
+            fail: config.fail as i32,
+            monitor_ie: config.monitor_ie as i32,
+        }));
+        esp!(unsafe { esp_mesh_set_attempts(raw) })?;
+        drop(unsafe { Box::from_raw(raw) });
+        Ok(())
+    }
+
+    /// Get attempts for mesh self-organized networking
+    pub fn get_attempts(&mut self) -> Result<MeshAttemptsConfig, EspError> {
+        let raw = Box::into_raw(Box::new(mesh_attempts_t::default()));
+        esp!(unsafe { esp_mesh_get_attempts(raw) })?;
+        let raw = unsafe { Box::from_raw(raw) };
+
+        Ok(MeshAttemptsConfig {
+            scan: raw.scan as u8,
+            vote: raw.vote as u8,
+            fail: raw.fail as u8,
+            monitor_ie: raw.monitor_ie as u8,
+        })
+    }
+
     pub fn set_max_layer(&mut self, max_layer: u16) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_set_max_layer(max_layer as i32) })
     }
@@ -440,7 +468,7 @@ impl EspMeshClient {
         (unsafe { esp_mesh_get_routing_table_size() }) as u8
     }
 
-    pub fn get_routing_table(&self) -> Result<Vec<mesh_addr_t>, EspError> {
+    pub fn get_routing_table(&self) -> Result<Vec<MeshAddr>, EspError> {
         let size = self.get_routing_table_size();
         let mut data: Vec<mesh_addr_t> = Vec::with_capacity(size as usize);
 
@@ -454,6 +482,11 @@ impl EspMeshClient {
         info!("Read routing table; size {}", out_len);
 
         let data = unsafe { Vec::from_raw_parts(data_p, out_len as usize, size as usize) };
+
+        let data = data
+            .into_iter()
+            .map(|a| MeshAddr::Mac(unsafe { a.addr }))
+            .collect();
 
         Ok(data)
     }
