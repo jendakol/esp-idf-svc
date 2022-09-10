@@ -1,57 +1,87 @@
 use alloc::boxed::Box;
 use core::fmt::{Debug, Formatter};
+use std::cell::UnsafeCell;
 use std::io::Write;
 use std::mem;
 use std::mem::transmute;
 use std::net::Ipv4Addr;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::ptr::{null, null_mut};
-use std::sync::Arc;
+use std::sync::mpsc::TryRecvError;
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use ::log::info;
 pub use embedded_svc::wifi::AuthMethod;
-use esp_idf_hal::mutex::Mutex;
 use esp_idf_sys::*;
-use log::{debug, error};
+use log::{debug, error, info};
 use once_cell::sync::Lazy;
 use pub_sub::{PubSub, Subscription};
 
 pub use types::*;
 
-static TAKEN: Mutex<bool> = Mutex::new(false);
+type GlobalClientInstance = Mutex<Option<Arc<RwLock<EspMeshClientInner>>>>;
 
-static EVENT_CHANNEL: Lazy<PubSub<MeshEvent>> = Lazy::new(|| PubSub::new());
+static INSTANCE: Lazy<GlobalClientInstance> = Lazy::new(|| Default::default());
+static EVENT_CHANNEL: Lazy<PubSub<MeshEvent>> = Lazy::new(PubSub::new);
 
 mod types;
 
-pub struct EspMeshClient {
+struct EspMeshClientInner {
     state: State,
-    event_handler: Arc<Box<dyn Fn(MeshEvent) -> () + Send + Sync>>,
+    event_handlers: Vec<Box<dyn Fn(MeshEvent) + Send + Sync>>,
+}
+
+#[derive(Clone)]
+pub struct EspMeshClient {
+    inner: Arc<RwLock<EspMeshClientInner>>,
 }
 
 impl Debug for EspMeshClient {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        let state = &self
+            .inner
+            .read()
+            .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance")
+            .state;
+
         f.debug_struct("EspMeshClient")
-            .field("state", &self.state)
+            .field("state", state)
             .finish()
     }
 }
 
 impl EspMeshClient {
-    pub fn new(
-        event_handler: Box<dyn Fn(MeshEvent) -> () + Send + Sync>,
+    pub fn get_instance(
+        event_handler: Box<dyn Fn(MeshEvent) + Send + Sync>,
     ) -> Result<Self, EspError> {
-        let mut taken = TAKEN.lock();
+        let instance = &mut (*INSTANCE
+            .lock()
+            .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance"));
 
-        if *taken {
-            error!("There must exist only a single ESP-WIFI-MESH client at the moment!");
-            esp!(ESP_ERR_INVALID_STATE as i32)?;
-        }
+        // get or init
+        let inner = match instance {
+            None => {
+                debug!("Will initialize ESP-WIFI-MESH client");
+                let new = Arc::new(RwLock::new(Self::init()?));
+                *instance = Some(Arc::clone(&new));
+                new
+            }
+            Some(cl) => Arc::clone(cl),
+        };
 
-        *taken = true;
+        debug!("ESP-WIFI-MESH initialized");
 
+        inner
+            .write()
+            .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance")
+            .event_handlers
+            .push(event_handler);
+
+        Ok(EspMeshClient { inner })
+    }
+
+    fn init() -> Result<EspMeshClientInner, EspError> {
         info!("Initializing ESP-WIFI-MESH");
         esp!(unsafe { esp_mesh_init() })?;
 
@@ -64,9 +94,9 @@ impl EspMeshClient {
             )
         })?;
 
-        Ok(Self {
+        Ok(EspMeshClientInner {
             state: State::Stopped,
-            event_handler: Arc::new(event_handler),
+            event_handlers: Vec::new(),
         })
     }
 }
@@ -97,20 +127,42 @@ impl EspMeshClient {
             return Ok(());
         }
 
-        let event_handler = Arc::clone(&self.event_handler);
-
         let sub: Subscription<MeshEvent> = EVENT_CHANNEL.subscribe();
+        let stopping = Arc::new(Mutex::new(false));
 
-        let s = sub.clone();
-        let event_loop = std::thread::spawn(move || {
-            for event in s.iter() {
-                (event_handler)(event);
+        let inner_copy = Arc::clone(&self.inner);
+        let sub_copy = sub.clone();
+        let stopping_copy = Arc::clone(&stopping);
+
+        let events_loop = std::thread::spawn(move || {
+            while !*stopping_copy.lock().expect("Poisoned stop-flag") {
+                match sub_copy.try_recv() {
+                    Ok(event) => {
+                        let event_handlers = &inner_copy
+                            .read()
+                            .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance")
+                            .event_handlers;
+
+                        for handler in event_handlers.iter() {
+                            (handler)(event);
+                        }
+                    }
+                    Err(TryRecvError::Empty) => (), // no event
+                    Err(TryRecvError::Disconnected) => {
+                        panic!("Event passing channel was disconnected!")
+                    }
+                }
             }
         });
 
         esp!(unsafe { esp_mesh_start() })?;
 
-        self.state = State::Started(sub, event_loop);
+        let inner = &mut *self
+            .inner
+            .write()
+            .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance");
+
+        inner.state = State::Started(Mutex::new((sub, events_loop, stopping)));
         Ok(())
     }
 
@@ -128,18 +180,37 @@ impl EspMeshClient {
     ///
     /// Does nothing if the mesh is already stopped.
     pub fn stop(&mut self) -> Result<(), EspError> {
-        if let State::Started(_sub, th) = mem::replace(&mut self.state, State::Stopped) {
+        let mut state = &mut self
+            .inner
+            .write()
+            .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance")
+            .state;
+
+        if let State::Started(lock) = mem::replace(state.deref_mut(), State::Stopped) {
+            let (_sub, th, stopping) = lock
+                .into_inner()
+                .expect("Poisoned mutex keeping ESP-WIFI-MESH instance");
+
+            *(stopping.lock().expect("Poisoned stop-flag")) = true;
+
             // cancel even handling (sub is dropped automatically)
             th.join().expect("Could not join callback thread");
-            esp!(unsafe { esp_mesh_stop() })
-        } else {
-            // make it idempotent
-            return Ok(());
-        }
+
+            esp!(unsafe { esp_mesh_stop() })?;
+        };
+        // else nothing - so it's idempotent
+
+        Ok(())
     }
 
     pub fn is_started(&self) -> bool {
-        matches!(self.state, State::Started(_, _))
+        matches!(
+            self.inner
+                .read()
+                .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance")
+                .state,
+            State::Started(_)
+        )
     }
 
     /// Send a packet over the mesh network:
@@ -147,7 +218,7 @@ impl EspMeshClient {
     /// - to any device in the mesh network
     /// - to external IP network
     pub fn send(
-        &mut self,
+        &self,
         to: MeshAddr,
         data: MeshData,
         flag: u32,
@@ -200,12 +271,12 @@ impl EspMeshClient {
     }
 
     /// Set blocking time of `send()`
-    pub fn send_block_time(&mut self, d: Duration) -> Result<(), EspError> {
+    pub fn send_block_time(&self, d: Duration) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_send_block_time(d.as_millis() as u32) })
     }
 
     /// Receive a packet targeted to self over the mesh network
-    pub fn recv(&mut self, timeout: Duration) -> Result<Option<RcvMessage>, EspError> {
+    pub fn recv(&self, timeout: Duration) -> Result<Option<RcvMessage>, EspError> {
         let rcv_addr = Box::into_raw(Box::new(mesh_addr_t::default()));
         let rcv_opt = Box::into_raw(Box::new(mesh_opt_t::default()));
 
@@ -217,13 +288,13 @@ impl EspMeshClient {
             ..Default::default()
         };
 
-        std::mem::forget(data_raw);
+        mem::forget(data_raw);
 
         let rcv_data = Box::into_raw(Box::new(rcv_data));
 
         let mut flag = 0;
 
-        let rcv_data = unsafe {
+        let (rcv_data, rcv_addr) = unsafe {
             let r = esp!(esp_mesh_recv(
                 rcv_addr,
                 rcv_data,
@@ -233,14 +304,14 @@ impl EspMeshClient {
                 0
             ));
 
-            info!("Raw recv: {:?}", r);
+            debug!("Raw recv: {:?}", r);
 
             // this is to fail if it should fail but still to release the memory potentially
             // allocated by the structs
 
-            // TODO use
-            let _rcv_addr = Box::from_raw(rcv_addr);
+            let rcv_addr = Box::<mesh_addr_t>::from_raw(rcv_addr);
             let rcv_data = Box::<mesh_data_t>::from_raw(rcv_data);
+            // TODO use
             let _rcv_opt = Box::from_raw(rcv_opt);
 
             if r.is_err_and(|e| e.code() == ESP_ERR_MESH_TIMEOUT) {
@@ -249,21 +320,11 @@ impl EspMeshClient {
                 r?;
             }
 
-            //     match *rcv_addr {
-            //     mesh_addr_t { mip: mip_t } => MeshAddr::MIP {
-            //         ip: mip.ip4.addr.into(),
-            //         port: mip.port,
-            //     },
-            //     mesh_addr_t { addr } => MeshAddr::Mac(addr.into()),
-            // };
-
-            Ok(rcv_data)
+            Ok((rcv_data, rcv_addr))
         }?;
 
-        let from: MeshAddr = MeshAddr::Mac([0, 0, 0, 0, 0, 0]);
-
+        let from: MeshAddr = MeshAddr::Mac(unsafe { rcv_addr.addr });
         let data = unsafe { Vec::from_raw_parts(rcv_data.data, rcv_data.size as usize, 256) };
-
         let proto: MeshProto = unsafe { transmute(rcv_data.proto as u8) };
         let tos: MeshTos = unsafe { transmute(rcv_data.tos as u8) };
 
@@ -275,11 +336,11 @@ impl EspMeshClient {
     }
 
     #[allow(non_snake_case)]
-    pub fn recv_toDS(&mut self) -> Result<(), EspError> {
+    pub fn recv_toDS(&self) -> Result<(), EspError> {
         todo!()
     }
 
-    pub fn set_config(&mut self, config: MeshConfig) -> Result<(), EspError> {
+    pub fn set_config(&self, config: MeshConfig) -> Result<(), EspError> {
         let mesh_id = mesh_addr_t {
             addr: config.mesh_id,
         };
@@ -369,7 +430,7 @@ impl EspMeshClient {
     /// - `Node`: designates a device as an intermediate device
     /// - `Leaf`: designates a device as a standalone Wi-Fi station that connects to a parent
     /// - `Sta`: designates a device as a standalone Wi-Fi station that connects to a router
-    pub fn set_type(&mut self, t: MeshNodeType) -> Result<(), EspError> {
+    pub fn set_type(&self, t: MeshNodeType) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_set_type(t.into()) })
     }
 
@@ -393,7 +454,7 @@ impl EspMeshClient {
     }
 
     /// Get attempts for mesh self-organized networking
-    pub fn get_attempts(&mut self) -> Result<MeshAttemptsConfig, EspError> {
+    pub fn get_attempts(&self) -> Result<MeshAttemptsConfig, EspError> {
         let raw = Box::into_raw(Box::new(mesh_attempts_t::default()));
         esp!(unsafe { esp_mesh_get_attempts(raw) })?;
         let raw = unsafe { Box::from_raw(raw) };
@@ -406,7 +467,7 @@ impl EspMeshClient {
         })
     }
 
-    pub fn set_max_layer(&mut self, max_layer: u16) -> Result<(), EspError> {
+    pub fn set_max_layer(&self, max_layer: u16) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_set_max_layer(max_layer as i32) })
     }
 
@@ -416,13 +477,13 @@ impl EspMeshClient {
 
     /// Set mesh softAP password.  
     /// This API shall be called before mesh is started.
-    pub fn set_ap_password(&mut self, pass: &str) -> Result<(), EspError> {
+    pub fn set_ap_password(&self, pass: &str) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_set_ap_password(pass.as_ptr(), pass.len() as i32) })
     }
 
     /// Set mesh softAP authentication mode.
     /// This API shall be called before mesh is started.
-    pub fn set_ap_authmode(&mut self, mode: AuthMethod) -> Result<(), EspError> {
+    pub fn set_ap_authmode(&self, mode: AuthMethod) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_set_ap_authmode(mode as u32) })
     }
 
@@ -433,7 +494,7 @@ impl EspMeshClient {
     /// Set mesh max connection value.  
     /// Set mesh softAP max connection = mesh max connection + non-mesh max connection  
     /// This API shall be called before mesh is started.
-    pub fn set_ap_connections(&mut self, max_connections: u8) -> Result<(), EspError> {
+    pub fn set_ap_connections(&self, max_connections: u8) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_set_ap_connections(max_connections as i32) })
     }
 
@@ -517,11 +578,11 @@ impl EspMeshClient {
         })
     }
 
-    pub fn enable_ps(&mut self) -> Result<(), EspError> {
+    pub fn enable_ps(&self) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_enable_ps() })
     }
 
-    pub fn disable_ps(&mut self) -> Result<(), EspError> {
+    pub fn disable_ps(&self) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_disable_ps() })
     }
 
@@ -538,7 +599,7 @@ impl EspMeshClient {
 
     /// Set mesh topology. The default value is Tree.
     /// Chain topology supports up to 1000 layers.
-    pub fn set_topology(&mut self, topo: MeshTopology) -> Result<(), EspError> {
+    pub fn set_topology(&self, topo: MeshTopology) -> Result<(), EspError> {
         esp!(unsafe { esp_mesh_set_topology(topo.into()) })
     }
 
@@ -548,10 +609,12 @@ impl EspMeshClient {
     }
 }
 
-impl Drop for EspMeshClient {
+impl Drop for EspMeshClientInner {
     fn drop(&mut self) {
-        let mut taken = TAKEN.lock();
-        *taken = false;
+        let mut instance = INSTANCE
+            .lock()
+            .expect("Poisoned RwLock keeping ESP-WIFI-MESH instance");
+        *instance = None;
 
         esp!(unsafe { esp_mesh_deinit() }).expect("Could not deinit ESP-WIFI-MESH!");
     }
