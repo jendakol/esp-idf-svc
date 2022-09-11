@@ -12,6 +12,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 pub use embedded_svc::wifi::AuthMethod;
+use embedded_svc::wifi::Wifi;
 use esp_idf_hal::mutex::Mutex;
 use esp_idf_sys::*;
 use log::{debug, error, info};
@@ -20,18 +21,29 @@ use pub_sub::{PubSub, Subscription};
 
 pub use types::*;
 
+use crate::wifi::EspWifi;
+
 static TAKEN: Mutex<bool> = Mutex::new(false);
 static EVENTS_CHANNEL: Lazy<PubSub<MeshEvent>> = Lazy::new(PubSub::new);
 
 mod types;
 
-#[derive(Debug)]
 pub struct EspMeshClient {
     state: State,
+    // yes, this is actually never read.. but we have to hold it's not neither used somewhere else nor dropped (=> deinitialized)
+    _wifi: EspWifi,
+}
+
+impl Debug for EspMeshClient {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EspMeshClient")
+            .field("state", &self.state)
+            .finish()
+    }
 }
 
 impl EspMeshClient {
-    pub fn get_instance() -> Result<EspMeshClient, EspError> {
+    pub fn get_instance(mut wifi: EspWifi) -> Result<EspMeshClient, EspError> {
         let mut taken = TAKEN.lock();
 
         if *taken {
@@ -40,6 +52,10 @@ impl EspMeshClient {
         }
 
         *taken = true;
+
+        // mesh won't start without this 🤷‍️
+        let aps = wifi.scan()?;
+        debug!("Visible networks: {:?}", aps);
 
         info!("Initializing ESP-WIFI-MESH");
         esp!(unsafe { esp_mesh_init() })?;
@@ -55,6 +71,7 @@ impl EspMeshClient {
 
         Ok(EspMeshClient {
             state: State::Stopped,
+            _wifi: wifi,
         })
     }
 }
