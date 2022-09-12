@@ -273,7 +273,8 @@ impl EspMeshClient {
         };
 
         let mut tmp = [0u8; 64];
-        (&mut tmp as &mut [u8])
+
+        tmp.as_mut_slice()
             .write_all(config.ap.password.as_bytes())
             .expect("Can't copy bytes in memory");
 
