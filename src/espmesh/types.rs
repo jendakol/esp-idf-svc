@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use core::fmt::{Debug, Formatter, Write};
+use std::io::Write as _;
 use std::mem::transmute;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
@@ -103,12 +104,12 @@ pub struct RcvMessage {
 }
 
 /// Mesh router configuration
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct MeshRouterConfig {
     /// SSID
-    pub ssid: &'static str,
+    pub ssid: String,
     /// password
-    pub password: &'static str,
+    pub password: String,
     /// BSSID, if this value is specified, users should also specify \"allow_router_switch\".
     pub bssid: Option<[u8; 6]>,
     /// if the BSSID is specified and this value is also set, when the router of this specified BSSID
@@ -118,6 +119,30 @@ pub struct MeshRouterConfig {
     /// There is a risk that if the password is different between the new switched router and the previous
     /// one, the mesh network could be established but the root will never connect to the new switched router.
     pub allow_router_switch: bool,
+}
+
+impl From<mesh_router_t> for MeshRouterConfig {
+    fn from(cfg: mesh_router_t) -> Self {
+        let is_bssid_empty = cfg.bssid == [0, 0, 0, 0, 0, 0];
+
+        let mut ssid: Vec<u8> = cfg.ssid.to_vec();
+        ssid.truncate(cfg.ssid_len as usize);
+        let ssid = String::from_utf8(ssid).expect("Can't decode raw value");
+
+        let password: Vec<u8> = cfg.password.to_vec();
+        let password = String::from_utf8(password).expect("Can't decode raw value");
+
+        MeshRouterConfig {
+            ssid,
+            password,
+            bssid: if is_bssid_empty {
+                None
+            } else {
+                Some(cfg.bssid)
+            },
+            allow_router_switch: cfg.allow_router_switch,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -131,7 +156,7 @@ pub struct MeshApConfig {
 }
 
 /// Mesh initialization configuration
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct MeshConfig {
     pub channel: u8,
     /// if this value is set, when \"fail\" (mesh_attempts_t) times is reached, device will change to
@@ -250,6 +275,7 @@ pub struct TxPacketsPending {
     /// broadcast and multicast queue
     pub broadcast: u32,
 }
+
 /// The number of packets available in the queue waiting to be received by applications
 #[derive(Debug, Copy, Clone)]
 pub struct RxPacketsPending {
