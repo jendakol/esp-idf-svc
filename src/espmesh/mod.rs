@@ -204,54 +204,66 @@ impl EspMeshClient {
 
     /// Receive a packet targeted to self over the mesh network
     pub fn recv(&self, timeout: Duration) -> Result<Option<RcvMessage>, EspError> {
+        if !self.has_rx_data_pending()? {
+            debug!("No data are pending to be received, early return");
+            return Ok(None);
+        }
+
         let rcv_addr = Box::into_raw(Box::new(mesh_addr_t::default()));
         let rcv_opt = Box::into_raw(Box::new(mesh_opt_t::default()));
 
-        let mut data_raw = Vec::<u8>::with_capacity(256);
+        println!("Free mem:      {} B", unsafe { esp_get_free_heap_size() });
+        println!("Max mem block: {} B", unsafe {
+            heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)
+        });
+
+        let mut data_raw = Vec::<u8>::with_capacity(MESH_MPS as usize);
 
         let rcv_data = mesh_data_t {
             data: data_raw.as_mut_ptr(),
-            size: 256,
+            size: MESH_MPS as u16,
             ..Default::default()
         };
-
-        mem::forget(data_raw);
 
         let rcv_data = Box::into_raw(Box::new(rcv_data));
 
         let mut flag = 0;
 
-        let (rcv_data, rcv_addr) = unsafe {
-            let r = esp!(esp_mesh_recv(
+        // this is to fail if it should fail but still to release the memory potentially
+        // allocated by the structs
+        let r = esp!(unsafe {
+            esp_mesh_recv(
                 rcv_addr,
                 rcv_data,
                 timeout.as_millis() as i32,
                 &mut flag,
                 rcv_opt,
-                0
-            ));
+                0,
+            )
+        });
 
-            debug!("Raw recv: {:?}", r);
+        debug!("Raw recv: {:?}", r);
 
-            // this is to fail if it should fail but still to release the memory potentially
-            // allocated by the structs
+        let rcv_addr = unsafe { Box::<mesh_addr_t>::from_raw(rcv_addr) };
+        let rcv_data = unsafe { Box::<mesh_data_t>::from_raw(rcv_data) };
+        // TODO use
+        let _rcv_opt = unsafe { Box::from_raw(rcv_opt) };
 
-            let rcv_addr = Box::<mesh_addr_t>::from_raw(rcv_addr);
-            let rcv_data = Box::<mesh_data_t>::from_raw(rcv_data);
-            // TODO use
-            let _rcv_opt = Box::from_raw(rcv_opt);
+        if r.is_err_and(|e| e.code() == ESP_ERR_MESH_TIMEOUT) {
+            return Ok(None);
+        } else {
+            r?;
+        }
 
-            if r.is_err_and(|e| e.code() == ESP_ERR_MESH_TIMEOUT) {
-                return Ok(None);
-            } else {
-                r?;
-            }
+        // To prevent double-free.
+        // If we do this earlier, we wouldn't release the memory in case of the early-return above.
+        mem::forget(data_raw);
 
-            Ok((rcv_data, rcv_addr))
-        }?;
+        let data = unsafe {
+            Vec::from_raw_parts(rcv_data.data, rcv_data.size as usize, MESH_MPS as usize)
+        };
 
         let from: MeshAddr = MeshAddr::Mac(unsafe { rcv_addr.addr });
-        let data = unsafe { Vec::from_raw_parts(rcv_data.data, rcv_data.size as usize, 256) };
         let proto: MeshProto = unsafe { transmute(rcv_data.proto as u8) };
         let tos: MeshTos = unsafe { transmute(rcv_data.tos as u8) };
 
@@ -260,6 +272,10 @@ impl EspMeshClient {
             data: MeshData { data, proto, tos },
             flag: flag as u16,
         }))
+    }
+
+    fn has_rx_data_pending(&self) -> Result<bool, EspError> {
+        Ok(self.get_rx_pending()?.to_self != 0)
     }
 
     #[allow(non_snake_case)]
@@ -337,7 +353,10 @@ impl EspMeshClient {
     }
 
     pub fn get_router(&self) -> Result<MeshRouterConfig, EspError> {
-        todo!()
+        let cfg: *mut mesh_router_t = Box::into_raw(Box::new(mesh_router_t::default()));
+        esp!(unsafe { esp_mesh_get_router(cfg) })?;
+        let cfg = MeshRouterConfig::from(*unsafe { Box::from_raw(cfg) });
+        Ok(cfg)
     }
 
     /// Set mesh network ID.  
