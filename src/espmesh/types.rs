@@ -36,7 +36,7 @@ pub enum State {
 #[derive(Debug, Copy, Clone)]
 pub enum MeshAddr {
     Mac([u8; 6]),
-    MIP { ip: Ipv4Addr, port: u16 },
+    MIP { ip: Ipv4Addr, port: u16 }, // it's really u16 in the ESP-IDF
 }
 
 impl From<MeshAddr> for mesh_addr_t {
@@ -99,6 +99,7 @@ pub enum MeshOpt {
 #[derive(Debug, Clone)]
 pub struct RcvMessage {
     pub from: MeshAddr,
+    pub to: MeshAddr,
     pub data: MeshData,
     pub flag: u16,
 }
