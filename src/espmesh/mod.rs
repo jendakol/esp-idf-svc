@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use anyhow::bail;
 use core::fmt::{Debug, Formatter};
 use std::cell::UnsafeCell;
 use std::io::Write;
@@ -12,7 +13,10 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 pub use embedded_svc::wifi::AuthMethod;
-use embedded_svc::wifi::Wifi;
+use embedded_svc::wifi::{
+    AccessPointConfiguration, ApIpStatus, ApStatus, ClientConfiguration, ClientConnectionStatus,
+    ClientIpStatus, ClientStatus, Configuration, Status, Wifi,
+};
 use esp_idf_hal::mutex::Mutex;
 use esp_idf_sys::*;
 use log::{debug, error, info};
@@ -31,7 +35,7 @@ mod types;
 pub struct EspMeshClient {
     state: State,
     // yes, this is actually never read.. but we have to hold it's not neither used somewhere else nor dropped (=> deinitialized)
-    _wifi: EspWifi,
+    _wifi: Box<EspWifi>,
 }
 
 impl Debug for EspMeshClient {
@@ -43,7 +47,7 @@ impl Debug for EspMeshClient {
 }
 
 impl EspMeshClient {
-    pub fn get_instance(mut wifi: EspWifi) -> Result<EspMeshClient, EspError> {
+    pub fn get_instance(mut wifi: Box<EspWifi>) -> Result<EspMeshClient, EspError> {
         let mut taken = TAKEN.lock();
 
         if *taken {
@@ -54,8 +58,10 @@ impl EspMeshClient {
         *taken = true;
 
         // mesh won't start without this 🤷‍️
-        let aps = wifi.scan()?;
-        debug!("Visible networks: {:?}", aps);
+        // let aps = wifi.scan()?;
+        // debug!("Visible networks: {:?}", aps);
+
+        Self::setup_wifi(&mut wifi).expect("FUUUUCK");
 
         info!("Initializing ESP-WIFI-MESH");
         esp!(unsafe { esp_mesh_init() })?;
@@ -109,6 +115,61 @@ impl EspMeshClient {
             esp!(unsafe { esp_mesh_start() })?;
         };
         // else nothing - so it's idempotent
+
+        Ok(())
+    }
+
+    fn setup_wifi(wifi: &mut EspWifi) -> Result<(), anyhow::Error> {
+        // info!("Attaching NETIF");
+        // wifi.with_client_netif_mut(|netif| {
+        //     let netif = netif.expect("Could not get NETIF");
+        //     esp!(unsafe { esp_netif_attach_wifi_station(netif.1) })
+        // })
+
+        let ap_infos = wifi.scan()?;
+
+        println!("11");
+        let ours = ap_infos.into_iter().find(|a| a.ssid == "Hrosinec");
+
+        let channel = if let Some(ours) = ours {
+            info!(
+                "Found configured access point {} on channel {}",
+                "Hrosinec", ours.channel
+            );
+            Some(ours.channel)
+        } else {
+            info!(
+            "Configured access point {} not found during scanning, will go with unknown channel",
+            "Hrosinec"
+        );
+            None
+        };
+
+        wifi.set_configuration(&Configuration::Client(ClientConfiguration {
+            ssid: "Hrosinec".into(),
+            password: "hrochLupinek".into(),
+            channel,
+            ..Default::default()
+        }))?;
+
+        info!("Wifi configuration set, about to get status");
+
+        wifi.wait_status_with_timeout(Duration::from_secs(20), |status| !status.is_transitional())
+            .map_err(|e| anyhow::anyhow!("Unexpected Wifi status: {:?}", e))?;
+
+        let status = wifi.get_status();
+
+        if let Status(
+            ClientStatus::Started(ClientConnectionStatus::Connected(ClientIpStatus::Done(
+                ip_settings,
+            ))),
+            ApStatus::Started(ApIpStatus::Done),
+        ) = status
+        {
+            info!("Wifi connected");
+        } else {
+            bail!("Unexpected Wifi status: {:?}", status);
+        }
 
         Ok(())
     }
