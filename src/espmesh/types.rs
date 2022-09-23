@@ -1,15 +1,8 @@
-use alloc::boxed::Box;
-use core::fmt::{Debug, Formatter, Write};
-use std::io::Write as _;
+use core::fmt::Debug;
 use std::mem::transmute;
 use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 
-use ::log::info;
 use esp_idf_sys::*;
-use log::error;
-use pub_sub::Subscription;
 
 macro_rules! simple_enum_mapping {
     ($rust:ident <=> $c_enum:ident) => {
