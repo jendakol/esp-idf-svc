@@ -12,8 +12,6 @@ pub use embedded_svc::wifi::AuthMethod;
 use esp_idf_hal::modem::WifiModemPeripheral;
 use esp_idf_sys::*;
 use log::{debug, error, info};
-use once_cell::sync::Lazy;
-use pub_sub::{PubSub, Subscription};
 
 pub use types::*;
 
@@ -21,7 +19,9 @@ use crate::private::mutex::{Mutex, RawMutex};
 use crate::wifi::EspWifi;
 
 static TAKEN: Mutex<bool> = Mutex::wrap(RawMutex::new(), false);
-static EVENTS_CHANNEL: Lazy<PubSub<MeshEvent>> = Lazy::new(PubSub::new);
+#[allow(clippy::type_complexity)]
+static SEND_CALLBACK: Mutex<Option<Box<dyn FnMut(MeshEvent) + Send>>> =
+    Mutex::wrap(RawMutex::new(), None);
 
 mod types;
 
@@ -40,9 +40,14 @@ impl Debug for EspMeshClient {
 }
 
 impl EspMeshClient {
-    pub fn get_instance<M: WifiModemPeripheral + 'static>(
+    pub fn take<M, F>(
         mut wifi: EspWifi<'static, M>,
-    ) -> Result<EspMeshClient, EspError> {
+        event_callback: F,
+    ) -> Result<EspMeshClient, EspError>
+    where
+        M: WifiModemPeripheral + 'static,
+        F: FnMut(MeshEvent) + Send + 'static,
+    {
         let mut taken = TAKEN.lock();
 
         if *taken {
@@ -58,6 +63,8 @@ impl EspMeshClient {
 
         info!("Initializing ESP-WIFI-MESH");
         esp!(unsafe { esp_mesh_init() })?;
+
+        *SEND_CALLBACK.lock() = Some(Box::new(event_callback));
 
         esp!(unsafe {
             esp_event_handler_register(
@@ -83,17 +90,13 @@ extern "C" fn mesh_event_handler(
 ) {
     let event = MeshEvent::from(event_id);
     info!("mesh_event_handler: {:?}", event);
-    EVENTS_CHANNEL
-        .send(event)
-        .expect("Event channel was closed");
+    let mut callback = SEND_CALLBACK.lock();
+    let callback = callback.as_deref_mut().expect("Callback was not set");
+
+    callback(event);
 }
 
 impl EspMeshClient {
-    /// Gets a subscription for all mesh events.
-    pub fn mesh_event_subscription(&self) -> Subscription<MeshEvent> {
-        EVENTS_CHANNEL.subscribe()
-    }
-
     /// Start mesh.
     ///
     /// - Initialize mesh IE.
