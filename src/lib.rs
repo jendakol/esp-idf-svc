@@ -6,6 +6,7 @@
 )]
 #![cfg_attr(feature = "nightly", feature(type_alias_impl_trait))]
 #![cfg_attr(not(version("1.66")), feature(const_btree_new))]
+#![feature(is_some_with)]
 
 #[cfg(any(feature = "alloc"))]
 #[allow(unused_imports)]

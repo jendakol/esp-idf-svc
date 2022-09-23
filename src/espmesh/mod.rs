@@ -13,7 +13,7 @@ use std::time::Duration;
 
 pub use embedded_svc::wifi::AuthMethod;
 use embedded_svc::wifi::Wifi;
-use esp_idf_hal::mutex::Mutex;
+use esp_idf_hal::modem::WifiModemPeripheral;
 use esp_idf_sys::*;
 use log::{debug, error, info};
 use once_cell::sync::Lazy;
@@ -21,20 +21,21 @@ use pub_sub::{PubSub, Subscription};
 
 pub use types::*;
 
+use crate::private::mutex::{Mutex, RawMutex};
 use crate::wifi::EspWifi;
 
-static TAKEN: Mutex<bool> = Mutex::new(false);
+static TAKEN: Mutex<bool> = Mutex::wrap(RawMutex::new(), false);
 static EVENTS_CHANNEL: Lazy<PubSub<MeshEvent>> = Lazy::new(PubSub::new);
 
 mod types;
 
-pub struct EspMeshClient {
+pub struct EspMeshClient<'d, M: WifiModemPeripheral> {
     state: State,
     // yes, this is actually never read.. but we have to hold it's not neither used somewhere else nor dropped (=> deinitialized)
-    _wifi: EspWifi,
+    _wifi: EspWifi<'d, M>,
 }
 
-impl Debug for EspMeshClient {
+impl<'d, M: WifiModemPeripheral> Debug for EspMeshClient<'d, M> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("EspMeshClient")
             .field("state", &self.state)
@@ -42,8 +43,8 @@ impl Debug for EspMeshClient {
     }
 }
 
-impl EspMeshClient {
-    pub fn get_instance(mut wifi: EspWifi) -> Result<EspMeshClient, EspError> {
+impl<'d, M: WifiModemPeripheral> EspMeshClient<'d, M> {
+    pub fn get_instance(mut wifi: EspWifi<'d, M>) -> Result<EspMeshClient<'d, M>, EspError> {
         let mut taken = TAKEN.lock();
 
         if *taken {
@@ -89,7 +90,7 @@ extern "C" fn mesh_event_handler(
         .expect("Event channel was closed");
 }
 
-impl EspMeshClient {
+impl<'d, M: WifiModemPeripheral> EspMeshClient<'d, M> {
     /// Gets a subscription for all mesh events.
     pub fn mesh_event_subscription(&self) -> Subscription<MeshEvent> {
         EVENTS_CHANNEL.subscribe()
@@ -641,7 +642,7 @@ impl EspMeshClient {
     }
 }
 
-impl Drop for EspMeshClient {
+impl<'d, M: WifiModemPeripheral> Drop for EspMeshClient<'d, M> {
     fn drop(&mut self) {
         let mut taken = TAKEN.lock();
         *taken = false;
