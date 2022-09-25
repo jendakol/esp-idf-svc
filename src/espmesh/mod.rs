@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use core::fmt::{Debug, Formatter};
+use std::any::Any;
 use std::mem;
 use std::mem::transmute;
 use std::net::Ipv4Addr;
@@ -24,15 +25,17 @@ static EVENTS_CHANNEL: Lazy<PubSub<MeshEvent>> = Lazy::new(PubSub::new);
 
 mod types;
 
-pub struct EspMeshClient<'a, M: WifiModemPeripheral> {
+pub struct EspMeshClient {
     state: State,
     // yes, this is actually never read.. but we have to hold it's not neither used somewhere else nor dropped (=> deinitialized)
-    _wifi: Arc<Mutex<EspWifi<'a, M>>>,
+    _wifi: Arc<Mutex<Box<dyn Any>>>,
 }
 
-pub struct EspMeshClientInner {}
+unsafe impl Send for EspMeshClient {}
 
-impl<'a, M: WifiModemPeripheral> Debug for EspMeshClient<'a, M> {
+unsafe impl Sync for EspMeshClient {}
+
+impl Debug for EspMeshClient {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("EspMeshClient")
             .field("state", &self.state)
@@ -40,8 +43,10 @@ impl<'a, M: WifiModemPeripheral> Debug for EspMeshClient<'a, M> {
     }
 }
 
-impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
-    pub fn get_instance(mut wifi: EspWifi<'a, M>) -> Result<EspMeshClient<'a, M>, EspError> {
+impl EspMeshClient {
+    pub fn get_instance<M: WifiModemPeripheral + 'static>(
+        mut wifi: EspWifi<'static, M>,
+    ) -> Result<EspMeshClient, EspError> {
         let mut taken = TAKEN.lock();
 
         if *taken {
@@ -54,8 +59,6 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
         // mesh won't start without this 🤷‍️
         let aps = wifi.scan()?;
         debug!("Visible networks: {:?}", aps);
-
-        let wifi = Arc::new(Mutex::new(wifi));
 
         info!("Initializing ESP-WIFI-MESH");
         esp!(unsafe { esp_mesh_init() })?;
@@ -71,7 +74,7 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
 
         Ok(EspMeshClient {
             state: State::Stopped,
-            _wifi: wifi,
+            _wifi: Arc::new(Mutex::new(Box::new(wifi))),
         })
     }
 }
@@ -89,7 +92,7 @@ extern "C" fn mesh_event_handler(
         .expect("Event channel was closed");
 }
 
-impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
+impl EspMeshClient {
     /// Gets a subscription for all mesh events.
     pub fn mesh_event_subscription(&self) -> Subscription<MeshEvent> {
         EVENTS_CHANNEL.subscribe()
@@ -360,10 +363,9 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
     }
 
     pub fn get_router(&self) -> Result<MeshRouterConfig, EspError> {
-        let cfg: *mut mesh_router_t = Box::into_raw(Box::new(mesh_router_t::default()));
-        esp!(unsafe { esp_mesh_get_router(cfg) })?;
-        let cfg = MeshRouterConfig::from(*unsafe { Box::from_raw(cfg) });
-        Ok(cfg)
+        let mut r = mesh_router_t::default();
+        esp!(unsafe { esp_mesh_get_router(&mut r as *mut mesh_router_t) })?;
+        Ok(r)
     }
 
     /// Set mesh network ID.  
@@ -535,7 +537,7 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
     }
 }
 
-impl<'a, M: WifiModemPeripheral> Drop for EspMeshClient<'a, M> {
+impl Drop for EspMeshClient {
     fn drop(&mut self) {
         let mut taken = TAKEN.lock();
         *taken = false;
