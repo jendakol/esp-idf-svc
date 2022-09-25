@@ -260,9 +260,9 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
         // If we do this earlier, we wouldn't release the memory in case of the early-return above.
         mem::forget(data_raw);
 
-        let data = unsafe {
-            Vec::from_raw_parts(rcv_data.data, rcv_data.size as usize, MESH_MPS as usize)
-        };
+        let data_size = rcv_data.size as usize;
+        let mut data = unsafe { Vec::from_raw_parts(rcv_data.data, data_size, MESH_MPS as usize) };
+        data.truncate(data_size);
 
         let addr_from: MeshAddr = MeshAddr::Mac(unsafe { rcv_addr.addr });
         let addr_to: MeshAddr = MeshAddr::Mac([0, 0, 0, 0, 0, 0]); // TODO get self
@@ -334,9 +334,9 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
         // If we do this earlier, we wouldn't release the memory in case of the early-return above.
         mem::forget(data_raw);
 
-        let data = unsafe {
-            Vec::from_raw_parts(rcv_data.data, rcv_data.size as usize, MESH_MPS as usize)
-        };
+        let data_size = rcv_data.size as usize;
+        let mut data = unsafe { Vec::from_raw_parts(rcv_data.data, data_size, MESH_MPS as usize) };
+        data.truncate(data_size);
 
         let addr_from: MeshAddr = MeshAddr::Mac(unsafe { rcv_addr_from.addr });
         let addr_to: mip_t = unsafe { rcv_addr_to.mip };
@@ -362,11 +362,6 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
 
     fn has_to_ds_data_pending(&self) -> Result<bool, EspError> {
         Ok(self.get_rx_pending()?.to_ds != 0)
-    }
-
-    #[allow(non_snake_case)]
-    pub fn recv_toDS(&self) -> Result<(), EspError> {
-        todo!()
     }
 
     pub fn set_config(&self, config: MeshConfig) -> Result<(), EspError> {
