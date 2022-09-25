@@ -1,6 +1,5 @@
 use alloc::boxed::Box;
 use core::fmt::{Debug, Formatter};
-use std::io::Write;
 use std::mem;
 use std::mem::transmute;
 use std::net::Ipv4Addr;
@@ -148,54 +147,53 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
     pub fn send(
         &self,
         to: MeshAddr,
-        data: MeshData,
+        data: &[u8],
+        proto: MeshProto,
+        tos: MeshTos,
         flag: u32,
         opt: Option<MeshOpt>,
     ) -> Result<(), EspError> {
-        let addr = Box::into_raw(Box::new(to.into()));
+        let addr: mesh_addr_t = to.into();
 
-        // to change to mut
-        let mut data = data;
-
-        let data = Box::into_raw(Box::new(mesh_data_t {
-            data: data.data.as_mut_ptr(),
-            size: data.data.len() as u16,
-            proto: data.proto.into(),
-            tos: data.tos.into(),
-        }));
+        let data = mesh_data_t {
+            data: data.as_ptr() as *mut u8,
+            size: data.len() as u16,
+            proto: proto.into(),
+            tos: tos.into(),
+        };
 
         let opt = opt.map(|o| match o {
             MeshOpt::SendGroup { addrs: _ } => {
                 // TODO fix
                 let mut data: Vec<u8> = vec![];
-                Box::into_raw(Box::new(mesh_opt_t {
+                mesh_opt_t {
                     type_: MESH_OPT_SEND_GROUP as u8,
                     val: data.as_mut_ptr(),
                     len: data.len() as u16,
-                }))
+                }
             }
-            MeshOpt::RecvDsAddr { ip } => Box::into_raw(Box::new(mesh_opt_t {
+            MeshOpt::RecvDsAddr { ip } => mesh_opt_t {
                 type_: MESH_OPT_RECV_DS_ADDR as u8,
                 val: ip.octets().as_mut_ptr(),
                 len: 4u16,
-            })),
+            },
         });
 
-        let (opt, opt_c) = if let Some(o) = opt {
-            (o, 1)
+        let (opt, opt_c) = if let Some(mut o) = opt {
+            (&mut o as *mut mesh_opt_t, 1)
         } else {
             (null_mut(), 0)
         };
 
-        unsafe {
-            let r = esp!(esp_mesh_send(addr, data, flag as i32, opt, opt_c));
-
-            drop(Box::from_raw(addr));
-            drop(Box::from_raw(data));
-            drop(Box::from_raw(opt));
-
-            r
-        }
+        esp!(unsafe {
+            esp_mesh_send(
+                &addr as *const mesh_addr_t,
+                &data as *const mesh_data_t,
+                flag as i32,
+                opt,
+                opt_c,
+            )
+        })
     }
 
     /// Set blocking time of `send()`
@@ -206,27 +204,20 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
     /// Receive a packet targeted to self over the mesh network
     pub fn recv(&self, timeout: Duration) -> Result<Option<RcvMessage>, EspError> {
         if !self.has_rx_data_pending()? {
-            debug!("No data are pending to be received, early return");
+            debug!("No data are pending to be forwarded, early return");
             return Ok(None);
         }
 
-        let rcv_addr = Box::into_raw(Box::new(mesh_addr_t::default()));
-        let rcv_opt = Box::into_raw(Box::new(mesh_opt_t::default()));
-
-        println!("Free mem:      {} B", unsafe { esp_get_free_heap_size() });
-        println!("Max mem block: {} B", unsafe {
-            heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)
-        });
+        let mut rcv_addr_from = mesh_addr_t::default();
+        let mut rcv_opt = mesh_opt_t::default();
 
         let mut data_raw = Vec::<u8>::with_capacity(MESH_MPS as usize);
 
-        let rcv_data = mesh_data_t {
+        let mut rcv_data = mesh_data_t {
             data: data_raw.as_mut_ptr(),
             size: MESH_MPS as u16,
             ..Default::default()
         };
-
-        let rcv_data = Box::into_raw(Box::new(rcv_data));
 
         let mut flag = 0;
 
@@ -234,21 +225,14 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
         // allocated by the structs
         let r = esp!(unsafe {
             esp_mesh_recv(
-                rcv_addr,
-                rcv_data,
+                &mut rcv_addr_from as *mut mesh_addr_t,
+                &mut rcv_data as *mut mesh_data_t,
                 timeout.as_millis() as i32,
                 &mut flag,
-                rcv_opt,
+                &mut rcv_opt as *mut mesh_opt_t,
                 0,
             )
         });
-
-        debug!("Raw recv: {:?}", r);
-
-        let rcv_addr = unsafe { Box::<mesh_addr_t>::from_raw(rcv_addr) };
-        let rcv_data = unsafe { Box::<mesh_data_t>::from_raw(rcv_data) };
-        // TODO use
-        let _rcv_opt = unsafe { Box::from_raw(rcv_opt) };
 
         if r.is_err_and(|e| e.code() == ESP_ERR_MESH_TIMEOUT) {
             return Ok(None);
@@ -263,16 +247,20 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
         let data_size = rcv_data.size as usize;
         let mut data = unsafe { Vec::from_raw_parts(rcv_data.data, data_size, MESH_MPS as usize) };
         data.truncate(data_size);
+        // TODO strip capacity of the vec
 
-        let addr_from: MeshAddr = MeshAddr::Mac(unsafe { rcv_addr.addr });
+        let addr_from: MeshAddr = MeshAddr::Mac(unsafe { rcv_addr_from.addr });
         let addr_to: MeshAddr = MeshAddr::Mac([0, 0, 0, 0, 0, 0]); // TODO get self
+
         let proto: MeshProto = unsafe { transmute(rcv_data.proto as u8) };
         let tos: MeshTos = unsafe { transmute(rcv_data.tos as u8) };
 
         Ok(Some(RcvMessage {
             from: addr_from,
             to: addr_to,
-            data: MeshData { data, proto, tos },
+            data,
+            proto,
+            tos,
             flag: flag as u16,
         }))
     }
@@ -284,19 +272,17 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
             return Ok(None);
         }
 
-        let rcv_addr_from = Box::into_raw(Box::new(mesh_addr_t::default()));
-        let rcv_addr_to = Box::into_raw(Box::new(mesh_addr_t::default()));
-        let rcv_opt = Box::into_raw(Box::new(mesh_opt_t::default()));
+        let mut rcv_addr_from = mesh_addr_t::default();
+        let mut rcv_addr_to = mesh_addr_t::default();
+        let mut rcv_opt = mesh_opt_t::default();
 
         let mut data_raw = Vec::<u8>::with_capacity(MESH_MPS as usize);
 
-        let rcv_data = mesh_data_t {
+        let mut rcv_data = mesh_data_t {
             data: data_raw.as_mut_ptr(),
             size: MESH_MPS as u16,
             ..Default::default()
         };
-
-        let rcv_data = Box::into_raw(Box::new(rcv_data));
 
         let mut flag = 0;
 
@@ -304,25 +290,17 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
         // allocated by the structs
         let r = esp!(unsafe {
             esp_mesh_recv_toDS(
-                rcv_addr_from,
-                rcv_addr_to,
-                rcv_data,
+                &mut rcv_addr_from as *mut mesh_addr_t,
+                &mut rcv_addr_to as *mut mesh_addr_t,
+                &mut rcv_data as *mut mesh_data_t,
                 timeout.as_millis() as i32,
                 &mut flag,
-                rcv_opt,
+                &mut rcv_opt as *mut mesh_opt_t,
                 0,
             )
         });
 
-        debug!("Raw recv_toDS: {:?}", r);
-
         assert!(MESH_DATA_TODS == flag as u32);
-
-        let rcv_addr_from = unsafe { Box::<mesh_addr_t>::from_raw(rcv_addr_from) };
-        let rcv_addr_to = unsafe { Box::<mesh_addr_t>::from_raw(rcv_addr_to) };
-        let rcv_data = unsafe { Box::<mesh_data_t>::from_raw(rcv_data) };
-        // TODO use
-        let _rcv_opt = unsafe { Box::from_raw(rcv_opt) };
 
         if r.is_err_and(|e| e.code() == ESP_ERR_MESH_TIMEOUT) {
             return Ok(None);
@@ -337,6 +315,7 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
         let data_size = rcv_data.size as usize;
         let mut data = unsafe { Vec::from_raw_parts(rcv_data.data, data_size, MESH_MPS as usize) };
         data.truncate(data_size);
+        // TODO strip capacity of the vec
 
         let addr_from: MeshAddr = MeshAddr::Mac(unsafe { rcv_addr_from.addr });
         let addr_to: mip_t = unsafe { rcv_addr_to.mip };
@@ -351,76 +330,23 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
         Ok(Some(RcvMessage {
             from: addr_from,
             to: addr_to,
-            data: MeshData { data, proto, tos },
+            data,
+            proto,
+            tos,
             flag: flag as u16,
         }))
     }
 
     fn has_rx_data_pending(&self) -> Result<bool, EspError> {
-        Ok(self.get_rx_pending()?.to_self != 0)
+        Ok(self.get_rx_pending()?.toSelf != 0)
     }
 
     fn has_to_ds_data_pending(&self) -> Result<bool, EspError> {
-        Ok(self.get_rx_pending()?.to_ds != 0)
+        Ok(self.get_rx_pending()?.toDS != 0)
     }
 
     pub fn set_config(&self, config: MeshConfig) -> Result<(), EspError> {
-        let mesh_id = mesh_addr_t {
-            addr: config.mesh_id,
-        };
-
-        let mut tmp = [0u8; 64];
-
-        tmp.as_mut_slice()
-            .write_all(config.ap.password.as_bytes())
-            .expect("Can't copy bytes in memory");
-
-        // TODO check max connections
-
-        let mesh_ap = mesh_ap_cfg_t {
-            password: tmp,
-            max_connection: config.ap.max_connection,
-            nonmesh_max_connection: config.ap.nonmesh_max_connection,
-        };
-
-        let password = config.router.password.as_bytes();
-
-        let mut tmp = [0u8; 64];
-        (&mut tmp as &mut [u8])
-            .write_all(password)
-            .expect("Can't copy bytes in memory");
-
-        let ssid = config.router.ssid.as_bytes();
-
-        let mut tmp2 = [0u8; 32];
-        (&mut tmp2 as &mut [u8])
-            .write_all(ssid)
-            .expect("Can't copy bytes in memory");
-
-        let router = mesh_router_t {
-            ssid: tmp2,
-            ssid_len: ssid.len() as u8,
-            password: tmp,
-            bssid: config.router.bssid.unwrap_or([0, 0, 0, 0, 0, 0]),
-            allow_router_switch: config.router.allow_router_switch,
-        };
-
-        let crypto_funcs = Box::into_raw(Box::new(unsafe { g_wifi_default_mesh_crypto_funcs }));
-
-        let cfg = Box::into_raw(Box::new(mesh_cfg_t {
-            mesh_id,
-            mesh_ap,
-            router,
-            channel: config.channel,
-            allow_channel_switch: config.allow_channel_switch,
-            crypto_funcs,
-        }));
-
-        unsafe {
-            let r = esp!(esp_mesh_set_config(cfg));
-            drop(Box::from_raw(cfg));
-            r
-        }
+        esp!(unsafe { esp_mesh_set_config(&config as *const mesh_cfg_t) })
     }
 
     pub fn get_config(&self) -> Result<MeshConfig, EspError> {
@@ -470,29 +396,16 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
 
     /// Set attempts for mesh self-organized networking
     pub fn set_attempts(&mut self, config: MeshAttemptsConfig) -> Result<(), EspError> {
-        let raw = Box::into_raw(Box::new(mesh_attempts_t {
-            scan: config.scan as i32,
-            vote: config.vote as i32,
-            fail: config.fail as i32,
-            monitor_ie: config.monitor_ie as i32,
-        }));
-        esp!(unsafe { esp_mesh_set_attempts(raw) })?;
-        drop(unsafe { Box::from_raw(raw) });
-        Ok(())
+        esp!(unsafe {
+            esp_mesh_set_attempts(&config as *const mesh_attempts_t as *mut mesh_attempts_t)
+        })
     }
 
     /// Get attempts for mesh self-organized networking
     pub fn get_attempts(&self) -> Result<MeshAttemptsConfig, EspError> {
-        let raw = Box::into_raw(Box::new(mesh_attempts_t::default()));
-        esp!(unsafe { esp_mesh_get_attempts(raw) })?;
-        let raw = unsafe { Box::from_raw(raw) };
-
-        Ok(MeshAttemptsConfig {
-            scan: raw.scan as u8,
-            vote: raw.vote as u8,
-            fail: raw.fail as u8,
-            monitor_ie: raw.monitor_ie as u8,
-        })
+        let mut r = mesh_attempts_t::default();
+        esp!(unsafe { esp_mesh_get_attempts(&mut r as *mut mesh_attempts_t) })?;
+        Ok(r)
     }
 
     pub fn set_max_layer(&self, max_layer: u16) -> Result<(), EspError> {
@@ -543,10 +456,9 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
     /// Get the parent BSSID.  
     /// This API shall be called after having received the event `ParentConnected`.
     pub fn get_parent_bssid(&self) -> Result<[u8; 6], EspError> {
-        let raw = Box::into_raw(Box::new(mesh_addr_t::default()));
-        esp!(unsafe { esp_mesh_get_parent_bssid(raw) })?;
-        let raw = unsafe { Box::from_raw(raw).addr };
-        Ok(raw)
+        let mut r = mesh_addr_t::default();
+        esp!(unsafe { esp_mesh_get_parent_bssid(&mut r as *mut mesh_addr_t) })?;
+        Ok(unsafe { r.addr }) // BSSID is a mac, not IP
     }
 
     pub fn is_root(&self) -> bool {
@@ -581,29 +493,15 @@ impl<'a, M: WifiModemPeripheral> EspMeshClient<'a, M> {
     }
 
     pub fn get_tx_pending(&self) -> Result<TxPacketsPending, EspError> {
-        let r = Box::into_raw(Box::new(mesh_tx_pending_t::default()));
-        esp!(unsafe { esp_mesh_get_tx_pending(r) })?;
-        let r = unsafe { Box::from_raw(r) };
-
-        Ok(TxPacketsPending {
-            to_parent: r.to_parent as u32,
-            to_parent_p2p: r.to_parent_p2p as u32,
-            to_child: r.to_child as u32,
-            to_child_p2p: r.to_child_p2p as u32,
-            mgmt: r.mgmt as u32,
-            broadcast: r.broadcast as u32,
-        })
+        let mut r = TxPacketsPending::default();
+        esp!(unsafe { esp_mesh_get_tx_pending(&mut r as *mut mesh_tx_pending_t) })?;
+        Ok(r)
     }
 
     pub fn get_rx_pending(&self) -> Result<RxPacketsPending, EspError> {
-        let r = Box::into_raw(Box::new(mesh_rx_pending_t::default()));
-        esp!(unsafe { esp_mesh_get_rx_pending(r) })?;
-        let r = unsafe { Box::from_raw(r) };
-
-        Ok(RxPacketsPending {
-            to_ds: r.toDS as u32,
-            to_self: r.toSelf as u32,
-        })
+        let mut r = RxPacketsPending::default();
+        esp!(unsafe { esp_mesh_get_rx_pending(&mut r as *mut mesh_rx_pending_t) })?;
+        Ok(r)
     }
 
     pub fn enable_ps(&self) -> Result<(), EspError> {

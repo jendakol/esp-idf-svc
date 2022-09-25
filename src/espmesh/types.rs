@@ -75,13 +75,6 @@ pub enum MeshTos {
 simple_enum_mapping!(MeshTos <=> mesh_tos_t);
 
 #[derive(Debug, Clone)]
-pub struct MeshData {
-    pub data: Vec<u8>,
-    pub proto: MeshProto,
-    pub tos: MeshTos,
-}
-
-#[derive(Debug, Clone)]
 pub enum MeshOpt {
     /// data transmission by group
     SendGroup { addrs: Vec<MeshAddr> },
@@ -93,91 +86,22 @@ pub enum MeshOpt {
 pub struct RcvMessage {
     pub from: MeshAddr,
     pub to: MeshAddr,
-    pub data: MeshData,
+    pub data: Vec<u8>,
+    pub proto: MeshProto,
+    pub tos: MeshTos,
     pub flag: u16,
 }
 
 /// Mesh router configuration
-#[derive(Debug, Clone)]
-pub struct MeshRouterConfig {
-    /// SSID
-    pub ssid: String,
-    /// password
-    pub password: String,
-    /// BSSID, if this value is specified, users should also specify \"allow_router_switch\".
-    pub bssid: Option<[u8; 6]>,
-    /// if the BSSID is specified and this value is also set, when the router of this specified BSSID
-    /// fails to be found after \"fail\" (mesh_attempts_t) times, the whole network is allowed to switch
-    /// to another router with the same SSID. The new router might also be on a different channel.
-    /// The default value is false.
-    /// There is a risk that if the password is different between the new switched router and the previous
-    /// one, the mesh network could be established but the root will never connect to the new switched router.
-    pub allow_router_switch: bool,
-}
+pub type MeshRouterConfig = mesh_router_t;
 
-impl From<mesh_router_t> for MeshRouterConfig {
-    fn from(cfg: mesh_router_t) -> Self {
-        let is_bssid_empty = cfg.bssid == [0, 0, 0, 0, 0, 0];
-
-        let mut ssid: Vec<u8> = cfg.ssid.to_vec();
-        ssid.truncate(cfg.ssid_len as usize);
-        let ssid = String::from_utf8(ssid).expect("Can't decode raw value");
-
-        let password: Vec<u8> = cfg.password.to_vec();
-        let password = String::from_utf8(password).expect("Can't decode raw value");
-
-        MeshRouterConfig {
-            ssid,
-            password,
-            bssid: if is_bssid_empty {
-                None
-            } else {
-                Some(cfg.bssid)
-            },
-            allow_router_switch: cfg.allow_router_switch,
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct MeshApConfig {
-    /// mesh softAP password
-    pub password: &'static str,
-    /// max mesh connections
-    pub max_connection: u8,
-    /// max non-mesh connections
-    pub nonmesh_max_connection: u8,
-}
+pub type MeshApConfig = mesh_ap_cfg_t;
 
 /// Mesh initialization configuration
-#[derive(Debug, Clone)]
-pub struct MeshConfig {
-    pub channel: u8,
-    /// if this value is set, when \"fail\" (mesh_attempts_t) times is reached, device will change to
-    /// a full channel scan for a network that could join. The default value is false.
-    pub allow_channel_switch: bool,
-    /// mesh network identification
-    pub mesh_id: [u8; 6],
-    /// router configuration
-    pub router: MeshRouterConfig,
-    /// mesh softAP configuration
-    pub ap: MeshApConfig,
-    // /// crypto functions
-    // pub crypto_funcs: *const mesh_crypto_funcs_t,
-}
+pub type MeshConfig = mesh_cfg_t;
 
 /// Attempts configuration for mesh self-organized networking
-#[derive(Debug, Copy, Clone)]
-pub struct MeshAttemptsConfig {
-    /// minimum scan times before being a root, default:10
-    pub scan: u8,
-    /// max vote times in self-healing, default:1000
-    pub vote: u8,
-    /// parent selection fail times, if the scan times reach this value, device will disconnect with associated children and join self-healing. default:60
-    pub fail: u8,
-    /// acceptable times of parent networking IE change before update its own networking IE. default:3
-    pub monitor_ie: u8,
-}
+pub type MeshAttemptsConfig = mesh_attempts_t;
 
 #[derive(Debug, Copy, Clone)]
 pub enum MeshEvent {
@@ -254,30 +178,10 @@ impl From<i32> for MeshEvent {
 }
 
 /// The number of packets pending in the queue waiting to be sent by the mesh stack
-#[derive(Debug, Copy, Clone)]
-pub struct TxPacketsPending {
-    /// to parent queue
-    pub to_parent: u32,
-    /// to parent (P2P) queue
-    pub to_parent_p2p: u32,
-    /// to child queue
-    pub to_child: u32,
-    /// to child (P2P) queue
-    pub to_child_p2p: u32,
-    /// management queue
-    pub mgmt: u32,
-    /// broadcast and multicast queue
-    pub broadcast: u32,
-}
+pub type TxPacketsPending = mesh_tx_pending_t;
 
 /// The number of packets available in the queue waiting to be received by applications
-#[derive(Debug, Copy, Clone)]
-pub struct RxPacketsPending {
-    /// to external DS
-    pub to_ds: u32,
-    /// to self
-    pub to_self: u32,
-}
+pub type RxPacketsPending = mesh_rx_pending_t;
 
 #[derive(Debug, Copy, Clone)]
 pub enum MeshTopology {
