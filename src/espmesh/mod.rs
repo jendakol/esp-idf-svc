@@ -28,12 +28,8 @@ mod types;
 pub struct EspMeshClient {
     state: State,
     // yes, this is actually never read.. but we have to hold it's not neither used somewhere else nor dropped (=> deinitialized)
-    _wifi: Arc<Mutex<Box<dyn Any>>>,
+    _wifi: Arc<Mutex<Box<dyn Any + Send>>>,
 }
-
-unsafe impl Send for EspMeshClient {}
-
-unsafe impl Sync for EspMeshClient {}
 
 impl Debug for EspMeshClient {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
