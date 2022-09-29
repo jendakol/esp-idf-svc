@@ -28,6 +28,7 @@ pub enum State {
 
 #[derive(Debug, Copy, Clone)]
 pub enum MeshAddr {
+    Root,
     Mac([u8; 6]),
     MIP { ip: Ipv4Addr, port: u16 }, // it's really u16 in the ESP-IDF
 }
@@ -42,6 +43,7 @@ impl From<MeshAddr> for mesh_addr_t {
                     port,
                 },
             },
+            MeshAddr::Root => mesh_addr_t::default(),
         }
     }
 }
