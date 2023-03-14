@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use core::fmt::{Debug, Formatter};
+use embedded_svc::io::Write;
 use std::any::Any;
 use std::mem;
 use std::mem::transmute;
@@ -12,6 +13,7 @@ pub use embedded_svc::wifi::AuthMethod;
 use esp_idf_hal::modem::WifiModemPeripheral;
 use esp_idf_sys::*;
 use log::{debug, error, info};
+use once_cell::sync::Lazy;
 
 pub use types::*;
 
@@ -24,6 +26,9 @@ static SEND_CALLBACK: Mutex<Option<Box<dyn FnMut(MeshEvent) + Send>>> =
     Mutex::wrap(RawMutex::new(), None);
 
 mod types;
+
+pub static ADDR_MULTICAST: Lazy<MeshAddr> =
+    Lazy::new(|| MeshAddr::Mac([0x01, 0x00, 0x5E, 0x00, 0x00, 0x02]));
 
 pub struct EspMeshClient {
     state: State,
@@ -165,9 +170,29 @@ impl EspMeshClient {
         };
 
         let opt = opt.map(|o| match o {
-            MeshOpt::SendGroup { addrs: _ } => {
-                // TODO fix
-                let mut data: Vec<u8> = vec![];
+            MeshOpt::SendGroup { addrs } => {
+                let mut data: Vec<u8> = Vec::with_capacity(addrs.len() * 6);
+
+                for addr in addrs {
+                    match addr {
+                        MeshAddr::Mac(bytes) => data
+                            .write_all(bytes.as_slice())
+                            .expect("Could not copy in-memory bytes"),
+                        _ => panic!(),
+                    }
+                }
+
+                println!("Addrs: {:?}", data);
+
+                // let mut data: Vec<mesh_addr_t> = Vec::with_capacity(addrs.len());
+                //
+                // for addr in addrs {
+                //     match addr {
+                //         MeshAddr::Mac(bytes) => data.push(mesh_addr_t { addr: bytes }),
+                //         _ => panic!(),
+                //     }
+                // }
+
                 mesh_opt_t {
                     type_: MESH_OPT_SEND_GROUP as u8,
                     val: data.as_mut_ptr(),
@@ -206,7 +231,7 @@ impl EspMeshClient {
     /// Receive a packet targeted to self over the mesh network
     pub fn recv(&self, timeout: Duration) -> Result<Option<RcvMessage>, EspError> {
         if !self.has_rx_data_pending()? {
-            debug!("No data are pending to be forwarded, early return");
+            debug!("No data are pending to be received, early return");
             return Ok(None);
         }
 
